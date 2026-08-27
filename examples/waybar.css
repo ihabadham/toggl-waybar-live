@@ -1,18 +1,18 @@
 #custom-toggl {
   padding-left: 8px;
   padding-right: 8px;
-  color: #79a9a3;
-  border-bottom: 2px solid #79a9a3;
+  color: #c98caf;
+  border-bottom: 2px solid #d5a59b;
   font-weight: 600;
 }
 
 #custom-toggl.running {
-  color: #79a9a3;
-  border-bottom-color: #79a9a3;
+  color: #c98caf;
+  border-bottom-color: #d5a59b;
 }
 
 #custom-toggl.idle {
-  color: #79a9a3;
+  color: #c98caf;
 }
 
 #custom-toggl.stale {
