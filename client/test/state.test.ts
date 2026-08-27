@@ -181,10 +181,20 @@ describe("client configuration", () => {
 
   it("loads strict configuration with the compact default label", () => {
     expect(loadConfig(validEnvironment)).toMatchObject({
+      apiBaseUrl: "https://api.track.toggl.com",
       timezone: "Africa/Cairo",
       relayUrl: "wss://relay.example/ws",
       labelMaxChars: 12,
     });
+  });
+
+  it("allows an API override only on loopback HTTP", () => {
+    expect(
+      loadConfig({ ...validEnvironment, TOGGL_API_BASE_URL: "http://127.0.0.1:8080" }).apiBaseUrl,
+    ).toBe("http://127.0.0.1:8080");
+    expect(() =>
+      loadConfig({ ...validEnvironment, TOGGL_API_BASE_URL: "https://attacker.example" }),
+    ).toThrow("TOGGL_API_BASE_URL");
   });
 
   it("loads renderer options without daemon credentials", () => {

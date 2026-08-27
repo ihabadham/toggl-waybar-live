@@ -38,7 +38,7 @@ export interface DaemonController {
 export async function startDaemon(): Promise<DaemonController> {
   const config = loadConfig();
   const runtimePath = defaultRuntimeStatePath();
-  const api = new TogglApi(config.togglApiToken);
+  const api = new TogglApi(config.togglApiToken, fetch, config.apiBaseUrl);
   const quota = new QuotaGate();
   let state: ClientState = createState(dayWindowAt(new Date(), config.timezone).dayKey);
   let publishQueue = Promise.resolve();
