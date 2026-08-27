@@ -1,0 +1,26 @@
+#custom-toggl {
+  padding-left: 8px;
+  padding-right: 8px;
+  color: #b88d4d;
+  border-bottom: 2px solid #b88d4d;
+  font-weight: 600;
+}
+
+#custom-toggl.running {
+  color: #a5c37a;
+  border-bottom-color: #a5c37a;
+}
+
+#custom-toggl.idle {
+  color: #b88d4d;
+}
+
+#custom-toggl.stale {
+  color: #d6a84f;
+  border-bottom-color: #d6a84f;
+}
+
+#custom-toggl.offline {
+  color: #937a5c;
+  border-bottom-color: #937a5c;
+}

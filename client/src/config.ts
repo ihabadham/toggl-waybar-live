@@ -38,6 +38,9 @@ function relayUrl(value: string): string {
   if (url.protocol !== "wss:" && !(url.protocol === "ws:" && isLocalHostname(url.hostname))) {
     throw new Error("TOGGL_RELAY_URL must use wss except on localhost");
   }
+  if (url.pathname !== "/ws" || url.search || url.hash || url.username || url.password) {
+    throw new Error("TOGGL_RELAY_URL must be a plain URL ending in /ws");
+  }
   return url.toString();
 }
 

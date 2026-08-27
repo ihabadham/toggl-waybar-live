@@ -199,6 +199,9 @@ describe("client configuration", () => {
     expect(() =>
       loadConfig({ ...validEnvironment, TOGGL_RELAY_URL: "ws://relay.example/ws" }),
     ).toThrow("TOGGL_RELAY_URL");
+    expect(() =>
+      loadConfig({ ...validEnvironment, TOGGL_RELAY_URL: "wss://relay.example/" }),
+    ).toThrow("TOGGL_RELAY_URL");
   });
 
   it("names invalid variables without exposing their values", () => {
