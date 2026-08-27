@@ -14,7 +14,7 @@
   "packageManager": "npm@11.8.0",
   "scripts": {
     "format": "biome format --write .",
-    "lint": "biome lint .",
+    "lint": "biome check .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build -w shared && npm run build -w client && npm run build -w worker",

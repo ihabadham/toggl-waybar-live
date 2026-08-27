@@ -1,0 +1,19 @@
+{
+  "name": "@toggl-waybar-live/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "types": "wrangler types worker-configuration.d.ts",
+    "typecheck": "npm run types && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run --config vitest.config.ts --max-workers=1 --no-isolate"
+  },
+  "dependencies": {
+    "@toggl-waybar-live/shared": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.1",
+    "wrangler": "4.127.0"
+  }
+}
