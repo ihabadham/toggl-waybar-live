@@ -147,22 +147,27 @@ active entry. Events for users other than the configured target user are
 acknowledged and ignored.
 
 The daemon reconciles through `GET /api/v9/me/time_entries` with the current
-local day's start and end. Running entries are included in the same response,
-so a separate current-entry request is unnecessary.
+local day's start and end, plus `GET /api/v9/me/time_entries/current`. The
+second request is required because Toggl filters the list by entry start time;
+an entry that began before local midnight can still be running today. Results
+are merged by entry ID.
 
 ### Quota budget
 
-Healthy operation is push-driven. Reconciliation is limited to at most one
-attempt per five-minute window and normally occurs only at startup or after a
-meaningful disconnection. While the relay is unavailable, the same limit forms
-the low-frequency REST fallback. All Toggl REST calls share one local quota
-gate; project-name lookup is deferred when that budget is low.
+Healthy operation is push-driven. A full, two-request reconciliation is limited
+to at most once per ten-minute window and normally occurs only at startup or
+after a meaningful disconnection. While the relay is unavailable, a
+current-entry-only check may run in the alternating five-minute window. All
+Toggl REST calls share one local quota gate; project-name lookup is deferred
+when that budget is low.
 
-This caps this application's user-specific steady-state fallback at 12 requests
-per hour, below Toggl's documented 30-request sliding-window quota. The client
-also reads `X-Toggl-Quota-Remaining` and `X-Toggl-Quota-Resets-In`, stops early
-when the budget is low, and honors Toggl's quota response instead of retrying.
-Project lookup is cached and requested only for an unknown project ID.
+This caps this application's user-specific steady-state fallback at 18 requests
+per hour: twelve current-entry checks and six daily-list requests.
+That remains below Toggl's documented 30-request sliding-window quota. The
+client also reads `X-Toggl-Quota-Remaining` and `X-Toggl-Quota-Resets-In`, stops
+early when the budget is low, and honors Toggl's quota response instead of
+retrying. Project lookup is cached and requested only for an unknown project
+ID.
 
 ## Protocol and state
 
