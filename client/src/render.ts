@@ -39,6 +39,25 @@ function elapsedSince(start: string, now: string): number {
   return Math.max(0, (Date.parse(now) - Date.parse(start)) / 1_000);
 }
 
+function formatRelativeAge(start: string, now: string): string {
+  const seconds = Math.floor(elapsedSince(start, now));
+  if (seconds < 10) {
+    return "just now";
+  }
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 function todayAt(state: RendererState, now: string): number {
   return (
     state.todayTrackedSeconds +
@@ -56,7 +75,7 @@ function tooltip(state: RendererState, now: string): string {
   }
   lines.push(`Today: ${formatDuration(todayAt(state, now))}`);
   if (state.lastSynchronizedAt) {
-    lines.push(`Last sync: ${escapeMarkup(state.lastSynchronizedAt)}`);
+    lines.push(`Last sync: ${formatRelativeAge(state.lastSynchronizedAt, now)}`);
   }
   if (state.connection === "stale") {
     lines.push("Connection stale");

@@ -38,6 +38,21 @@ describe("Waybar rendering", () => {
     expect(output.tooltip).toContain("Today: 01:23:50");
   });
 
+  it.each([
+    ["2026-08-27T11:59:55Z", "just now"],
+    ["2026-08-27T11:59:18Z", "42s ago"],
+    ["2026-08-27T11:52:00Z", "8m ago"],
+    ["2026-08-27T09:00:00Z", "3h ago"],
+    ["2026-08-25T12:00:00Z", "2d ago"],
+  ])("shows a human sync age for %s", (lastSynchronizedAt, expectedAge) => {
+    const output = renderWaybar(rendererState({ lastSynchronizedAt }), "2026-08-27T12:00:00Z", {
+      labelMaxChars: 12,
+    });
+
+    expect(output.tooltip).toContain(`Last sync: ${expectedAge}`);
+    expect(output.tooltip).not.toContain(lastSynchronizedAt);
+  });
+
   it("renders idle, stale running, and offline states", () => {
     expect(
       renderWaybar(
