@@ -76,10 +76,9 @@ describe("runtime state file", () => {
     expect(first).toEqual(second);
 
     await writeFile(path, "{}", "utf8");
-    expect(JSON.parse(await renderOnce(path, 12))).toEqual({
-      text: "Toggl offline",
-      tooltip: "Toggl unavailable",
-      class: ["offline"],
-    });
+    const rendered = JSON.parse(await renderOnce(path, 12));
+    expect(rendered).toMatchObject({ class: ["offline"] });
+    expect(rendered.text).toContain("Toggl offline");
+    expect(rendered.tooltip).toContain("Relay offline");
   });
 });

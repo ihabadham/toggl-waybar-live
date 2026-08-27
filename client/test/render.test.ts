@@ -5,6 +5,10 @@ import type { RendererState } from "../src/state.js";
 
 const generatedAt = "2026-08-27T12:00:00Z";
 
+function plainMarkup(value: string): string {
+  return value.replaceAll(/<[^>]+>/g, "");
+}
+
 function rendererState(overrides: Partial<RendererState> = {}): RendererState {
   return {
     status: "running",
@@ -23,10 +27,13 @@ function rendererState(overrides: Partial<RendererState> = {}): RendererState {
 
 describe("Waybar rendering", () => {
   it("renders a compact connected timer with 12-character truncation", () => {
-    expect(renderWaybar(rendererState(), generatedAt, { labelMaxChars: 12 })).toMatchObject({
-      text: "▶ PR review e… 01:23:45",
+    const output = renderWaybar(rendererState(), generatedAt, { labelMaxChars: 12 });
+
+    expect(output).toMatchObject({
       class: ["running", "connected"],
     });
+    expect(plainMarkup(output.text)).toBe("● PR review e… 01:23:45");
+    expect(output.text).toContain('foreground="#E57CD8" alpha="100%"');
   });
 
   it("ticks the entry and today's total locally", () => {
@@ -34,8 +41,10 @@ describe("Waybar rendering", () => {
       labelMaxChars: 12,
     });
 
-    expect(output.text).toContain("01:23:50");
-    expect(output.tooltip).toContain("Today: 01:23:50");
+    expect(plainMarkup(output.text)).toContain("01:23:50");
+    expect(plainMarkup(output.tooltip)).toContain("Today     01:23:50");
+    expect(output.tooltip).toContain("<b>PR review extremely long</b>");
+    expect(plainMarkup(output.tooltip)).toContain("Relay connected · full sync just now");
   });
 
   it.each([
@@ -49,37 +58,40 @@ describe("Waybar rendering", () => {
       labelMaxChars: 12,
     });
 
-    expect(output.tooltip).toContain(`Last sync: ${expectedAge}`);
+    expect(plainMarkup(output.tooltip)).toContain(`full sync ${expectedAge}`);
     expect(output.tooltip).not.toContain(lastSynchronizedAt);
   });
 
   it("renders idle, stale running, and offline states", () => {
-    expect(
-      renderWaybar(
-        rendererState({
-          status: "idle",
-          label: null,
-          description: null,
-          projectName: null,
-          entryStart: null,
-          runningContributesToToday: false,
-        }),
-        generatedAt,
-        { labelMaxChars: 12 },
-      ).text,
-    ).toBe("Today 01:23:45");
-
-    expect(
-      renderWaybar(rendererState({ connection: "stale" }), generatedAt, {
-        labelMaxChars: 12,
+    const idle = renderWaybar(
+      rendererState({
+        status: "idle",
+        label: null,
+        description: null,
+        projectName: null,
+        entryStart: null,
+        runningContributesToToday: false,
       }),
-    ).toMatchObject({ text: "⚠ PR review e… 01:23:45", class: ["running", "stale"] });
+      generatedAt,
+      { labelMaxChars: 12 },
+    );
+    expect(plainMarkup(idle.text)).toBe("○ Today 01:23:45");
 
-    expect(
-      renderWaybar(rendererState({ status: "offline", connection: "offline" }), generatedAt, {
-        labelMaxChars: 12,
-      }),
-    ).toEqual({ text: "Toggl offline", tooltip: "Toggl unavailable", class: ["offline"] });
+    const stale = renderWaybar(rendererState({ connection: "stale" }), generatedAt, {
+      labelMaxChars: 12,
+    });
+    expect(stale.class).toEqual(["running", "stale"]);
+    expect(plainMarkup(stale.text)).toBe("⚠ PR review e… 01:23:45");
+    expect(plainMarkup(stale.tooltip)).toContain("Relay stale · full sync just now");
+
+    const offline = renderWaybar(
+      rendererState({ status: "offline", connection: "offline" }),
+      generatedAt,
+      { labelMaxChars: 12 },
+    );
+    expect(offline.class).toEqual(["offline"]);
+    expect(plainMarkup(offline.text)).toBe("● Toggl offline");
+    expect(plainMarkup(offline.tooltip)).toContain("Relay offline");
   });
 
   it("falls back from an empty description to project name and then Running", () => {
@@ -100,13 +112,23 @@ describe("Waybar rendering", () => {
   });
 
   it("keeps elapsed hours above 99 and truncates by Unicode code point", () => {
-    expect(
-      renderWaybar(
-        rendererState({ label: "🧪🧪🧪", entryStart: "2026-08-23T08:00:00Z" }),
-        generatedAt,
-        { labelMaxChars: 2 },
-      ).text,
-    ).toBe("▶ 🧪… 100:00:00");
+    const output = renderWaybar(
+      rendererState({ label: "🧪🧪🧪", entryStart: "2026-08-23T08:00:00Z" }),
+      generatedAt,
+      { labelMaxChars: 2 },
+    );
+    expect(plainMarkup(output.text)).toBe("● 🧪… 100:00:00");
+  });
+
+  it("pulses only the running activity dot", () => {
+    const even = renderWaybar(rendererState(), "2026-08-27T12:00:00Z", { labelMaxChars: 12 });
+    const odd = renderWaybar(rendererState(), "2026-08-27T12:00:01Z", { labelMaxChars: 12 });
+
+    expect(even.text).toContain('alpha="100%"');
+    expect(odd.text).toContain('alpha="55%"');
+    expect(plainMarkup(even.text).replace("01:23:45", "timer")).toBe(
+      plainMarkup(odd.text).replace("01:23:46", "timer"),
+    );
   });
 
   it("escapes Pango markup in tooltip fields", () => {
@@ -119,6 +141,7 @@ describe("Waybar rendering", () => {
     expect(output.tooltip).toContain("&lt;review &amp; fix&gt;");
     expect(output.tooltip).toContain("R&amp;D &quot;core&quot;");
     expect(output.tooltip).not.toContain("<review");
+    expect(output.text).not.toContain("<review");
   });
 
   it("shows the full active timer without adding pre-midnight time to today's total", () => {
@@ -133,6 +156,6 @@ describe("Waybar rendering", () => {
     );
 
     expect(output.text).toContain("15:30:00");
-    expect(output.tooltip).toContain("Today: 00:00:00");
+    expect(plainMarkup(output.tooltip)).toContain("Today     00:00:00");
   });
 });

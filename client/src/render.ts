@@ -35,6 +35,10 @@ function escapeMarkup(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
+function colored(value: string, color: string): string {
+  return `<span foreground="${color}">${value}</span>`;
+}
+
 function elapsedSince(start: string, now: string): number {
   return Math.max(0, (Date.parse(now) - Date.parse(start)) / 1_000);
 }
@@ -58,6 +62,15 @@ function formatRelativeAge(start: string, now: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+function formatStartTime(start: string, now: string): string {
+  const includeDate = elapsedSince(start, now) >= 86_400;
+  return new Intl.DateTimeFormat(undefined, {
+    ...(includeDate ? { month: "short", day: "numeric" } : {}),
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(start));
+}
+
 function todayAt(state: RendererState, now: string): number {
   return (
     state.todayTrackedSeconds +
@@ -65,22 +78,57 @@ function todayAt(state: RendererState, now: string): number {
   );
 }
 
-function tooltip(state: RendererState, now: string): string {
-  const lines: string[] = [];
-  if (state.status === "running") {
-    lines.push(escapeMarkup(state.description || state.projectName || "Running"));
-    if (state.projectName) {
-      lines.push(`Project: ${escapeMarkup(state.projectName)}`);
-    }
-  }
-  lines.push(`Today: ${formatDuration(todayAt(state, now))}`);
-  if (state.lastSynchronizedAt) {
-    lines.push(`Last sync: ${formatRelativeAge(state.lastSynchronizedAt, now)}`);
+function relayStatus(state: RendererState, now: string): string {
+  const synchronized = state.lastSynchronizedAt
+    ? ` · full sync ${formatRelativeAge(state.lastSynchronizedAt, now)}`
+    : "";
+  if (state.connection === "connected") {
+    return `${colored("●", "#A5C37A")} ${colored(`Relay connected${synchronized}`, "#A99D88")}`;
   }
   if (state.connection === "stale") {
-    lines.push("Connection stale");
+    return `${colored("⚠", "#D6A84F")} ${colored(`Relay stale${synchronized}`, "#D6A84F")}`;
   }
-  return lines.join("\n");
+  return `${colored("●", "#937A5C")} ${colored("Relay offline", "#937A5C")}`;
+}
+
+function detail(label: string, value: string): string {
+  return `${colored(label.padEnd(10), "#A99D88")}${value}`;
+}
+
+function tooltip(state: RendererState, now: string): string {
+  const divider = colored("────────────────────────────", "#5B503B");
+  const today = formatDuration(todayAt(state, now));
+  if (state.status === "running" && state.entryStart) {
+    const title = escapeMarkup(state.description || state.projectName || "Running");
+    const active = formatDuration(elapsedSince(state.entryStart, now));
+    const project = escapeMarkup(state.projectName || "Unassigned");
+    return [
+      `<b>${title}</b>`,
+      `${colored("● TRACKING", "#C98CAF")}                 ${colored(`<b>${active}</b>`, "#D5A59B")}`,
+      divider,
+      `<tt>${detail("Project", project)}\n${detail("Started", formatStartTime(state.entryStart, now))}\n${detail("Today", today)}</tt>`,
+      divider,
+      relayStatus(state, now),
+    ].join("\n");
+  }
+
+  return [
+    "<b>Toggl Track</b>",
+    colored("○ NO TIMER RUNNING", "#D5A59B"),
+    divider,
+    `<tt>${detail("Today", today)}</tt>`,
+    divider,
+    relayStatus(state, now),
+  ].join("\n");
+}
+
+function runningText(label: string, active: string, now: string): string {
+  const pulseAlpha = new Date(now).getUTCSeconds() % 2 === 0 ? "100%" : "55%";
+  return [
+    `<span foreground="#E57CD8" alpha="${pulseAlpha}">●</span>`,
+    colored(escapeMarkup(label), "#C98CAF"),
+    colored(active, "#D5A59B"),
+  ].join(" ");
 }
 
 export function renderWaybar(
@@ -89,26 +137,40 @@ export function renderWaybar(
   options: RenderOptions,
 ): WaybarOutput {
   if (state.status === "offline") {
-    return { text: "Toggl offline", tooltip: "Toggl unavailable", class: ["offline"] };
+    return {
+      text: colored("● Toggl offline", "#937A5C"),
+      tooltip: `<b>Toggl Track</b>\n${relayStatus(state, now)}`,
+      class: ["offline"],
+    };
   }
 
   const today = formatDuration(todayAt(state, now));
   if (state.status === "idle") {
     return {
-      text: `${state.connection === "stale" ? "⚠ " : ""}Today ${today}`,
+      text:
+        state.connection === "stale"
+          ? colored(`⚠ Today ${today}`, "#D6A84F")
+          : `${colored("○", "#D5A59B")} ${colored("Today", "#C98CAF")} ${colored(today, "#D5A59B")}`,
       tooltip: tooltip(state, now),
       class: ["idle", state.connection],
     };
   }
 
   if (state.entryStart === null) {
-    return { text: "Toggl offline", tooltip: "Toggl unavailable", class: ["offline"] };
+    return {
+      text: colored("● Toggl offline", "#937A5C"),
+      tooltip: `<b>Toggl Track</b>\n${relayStatus({ ...state, connection: "offline" }, now)}`,
+      class: ["offline"],
+    };
   }
 
   const label = truncate(state.label || "Running", options.labelMaxChars);
   const active = formatDuration(elapsedSince(state.entryStart, now));
   return {
-    text: `${state.connection === "stale" ? "⚠" : "▶"} ${label} ${active}`,
+    text:
+      state.connection === "stale"
+        ? colored(`⚠ ${escapeMarkup(label)} ${active}`, "#D6A84F")
+        : runningText(label, active, now),
     tooltip: tooltip(state, now),
     class: ["running", state.connection],
   };
