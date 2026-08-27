@@ -55,6 +55,12 @@ function labelLimit(value: string | undefined): number {
   return limit;
 }
 
+export function loadRendererOptions(
+  environment: NodeJS.ProcessEnv = process.env,
+): Pick<ClientConfig, "labelMaxChars"> {
+  return { labelMaxChars: labelLimit(environment.TOGGL_LABEL_MAX_CHARS) };
+}
+
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ClientConfig {
   const timezone = required(environment, "TOGGL_TIMEZONE");
   if (!validTimezone(timezone)) {
@@ -66,6 +72,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Client
     timezone,
     relayUrl: relayUrl(required(environment, "TOGGL_RELAY_URL")),
     relayToken: required(environment, "TOGGL_RELAY_TOKEN"),
-    labelMaxChars: labelLimit(environment.TOGGL_LABEL_MAX_CHARS),
+    ...loadRendererOptions(environment),
   };
 }

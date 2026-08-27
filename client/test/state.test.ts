@@ -1,7 +1,7 @@
 import type { NormalizedEntry, RelayMessage } from "@toggl-waybar-live/shared";
 import { describe, expect, it } from "vitest";
 
-import { loadConfig } from "../src/config.js";
+import { loadConfig, loadRendererOptions } from "../src/config.js";
 import { dayWindowAt } from "../src/day-window.js";
 import {
   applyRelayMessage,
@@ -185,6 +185,11 @@ describe("client configuration", () => {
       relayUrl: "wss://relay.example/ws",
       labelMaxChars: 12,
     });
+  });
+
+  it("loads renderer options without daemon credentials", () => {
+    expect(loadRendererOptions({})).toEqual({ labelMaxChars: 12 });
+    expect(loadRendererOptions({ TOGGL_LABEL_MAX_CHARS: "8" })).toEqual({ labelMaxChars: 8 });
   });
 
   it("allows insecure WebSockets only on localhost", () => {

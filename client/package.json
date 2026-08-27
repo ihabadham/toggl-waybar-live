@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "toggl-waybar-daemon": "dist/daemon.js",
+    "toggl-waybar-render": "dist/renderer.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
@@ -10,9 +14,12 @@
   },
   "dependencies": {
     "@toggl-waybar-live/shared": "*",
-    "luxon": "3.7.2"
+    "luxon": "3.7.2",
+    "ws": "8.21.3",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/luxon": "3.7.5"
+    "@types/luxon": "3.7.5",
+    "@types/ws": "8.18.1"
   }
 }

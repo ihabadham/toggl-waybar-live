@@ -62,6 +62,10 @@ function rotateDay(state: ClientState, window: DayWindow): ClientState {
       };
 }
 
+export function advanceDay(state: ClientState, window: DayWindow): ClientState {
+  return rotateDay(state, window);
+}
+
 function currentFromSnapshot(snapshot: RunningSnapshot, state: ClientState): CurrentEntry {
   const known = state.entries.get(snapshot.entryId);
   const previous = state.current?.id === snapshot.entryId ? state.current : null;
@@ -155,6 +159,31 @@ export function replaceReconciledEntries(
           },
     currentContributesToToday: current !== null && instantBelongsToDay(current.start, window),
     entries: today,
+    lastSynchronizedAt: synchronizedAt,
+  };
+}
+
+export function replaceReconciledCurrent(
+  initialState: ClientState,
+  current: NormalizedEntry | null,
+  window: DayWindow,
+  synchronizedAt: string,
+): ClientState {
+  const state = rotateDay(initialState, window);
+  return {
+    ...state,
+    current:
+      current === null
+        ? null
+        : {
+            id: current.id,
+            workspaceId: current.workspaceId,
+            projectId: current.projectId,
+            projectName: current.projectName,
+            description: current.description,
+            start: current.start,
+          },
+    currentContributesToToday: current !== null && instantBelongsToDay(current.start, window),
     lastSynchronizedAt: synchronizedAt,
   };
 }
