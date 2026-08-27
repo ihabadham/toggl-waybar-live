@@ -9,6 +9,14 @@ for required_command in node npm openssl mktemp sed dirname mkdir rm chmod mv; d
     exit 1
   fi
 done
+node_binary=$(command -v node)
+case "$node_binary" in
+  /*) ;;
+  *)
+    printf 'Node must resolve to an absolute executable path.\n' >&2
+    exit 1
+    ;;
+esac
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(dirname -- "$script_directory")
@@ -142,12 +150,12 @@ trap 'rm -f "$environment_temporary" "$unit_temporary" "$daemon_temporary" "$ren
 
 {
   printf '%s\n' '#!/bin/sh'
-  printf 'exec /usr/bin/env node "%s/client/dist/daemon.js" "$@"\n' "$repository_root"
+  printf 'exec "%s" "%s/client/dist/daemon.js" "$@"\n' "$node_binary" "$repository_root"
 } >"$daemon_temporary"
 
 {
   printf '%s\n' '#!/bin/sh'
-  printf 'exec /usr/bin/env node "%s/client/dist/renderer.js" "$@"\n' "$repository_root"
+  printf 'exec "%s" "%s/client/dist/renderer.js" "$@"\n' "$node_binary" "$repository_root"
 } >"$renderer_temporary"
 
 chmod 0600 "$environment_temporary"
