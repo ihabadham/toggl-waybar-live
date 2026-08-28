@@ -18,6 +18,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build -w shared && npm run build -w client && npm run build -w worker",
+    "deploy": "npm run build -w shared && npm run deploy -w worker",
     "check": "npm run build -w shared && npm run lint && npm run typecheck && npm test"
   },
   "devDependencies": {

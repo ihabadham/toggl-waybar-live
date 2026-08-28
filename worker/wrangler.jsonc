@@ -3,6 +3,9 @@
   "name": "toggl-waybar-live",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-27",
+  "secrets": {
+    "required": ["RELAY_TOKEN", "TOGGL_USER_ID", "TOGGL_WEBHOOK_SECRET"]
+  },
   "durable_objects": {
     "bindings": [
       {

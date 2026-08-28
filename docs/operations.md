@@ -30,7 +30,12 @@ the daemon publishes a valid replacement. Runtime state lives under
 
 ## Update a clone
 
-After pulling code, refresh the build, launchers, and unit paths:
+Merging a reviewed pull request into protected `main` triggers the Cloudflare
+production build and Worker deployment. Follow its status under the Worker's
+**Deployments** page.
+
+After pulling the same change locally, refresh the client build, launchers, and
+unit paths:
 
 ```sh
 npm install
@@ -38,6 +43,20 @@ npm install
 systemctl --user daemon-reload
 systemctl --user restart toggl-waybar-live.service
 ```
+
+## Roll back the Worker
+
+Cloudflare retains recent Worker versions. To restore the version immediately
+before the active one:
+
+```sh
+npx wrangler rollback --config worker/wrangler.jsonc
+```
+
+To choose a specific version, open the Worker in Cloudflare, select
+**Deployments**, open the version's three-dot menu, and select **Rollback**.
+Rollback changes the active Worker version; it does not modify the Git branch,
+so follow it with a corrective pull request.
 
 ## Remove the integration
 
@@ -47,7 +66,8 @@ First delete the Toggl webhook subscription using an authenticated `DELETE` to:
 https://api.track.toggl.com/webhooks/api/v1/subscriptions/WORKSPACE_ID/SUBSCRIPTION_ID
 ```
 
-Then remove the Cloudflare Worker:
+Disconnect **Settings > Builds** before removing the Cloudflare Worker so a
+later push cannot recreate a deployment. Then remove the Worker:
 
 ```sh
 npx wrangler delete --config worker/wrangler.jsonc

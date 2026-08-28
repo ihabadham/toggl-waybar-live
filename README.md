@@ -18,5 +18,9 @@ session. Start with [the setup guide](docs/setup.md). The architecture and
 failure behavior are documented in [the design](docs/design.md), with recovery
 commands in [operations](docs/operations.md).
 
+Cloudflare Workers Builds can connect the deployed Worker to the repository and
+run `npm run deploy` automatically whenever protected `main` changes. Runtime
+secrets stay in Cloudflare rather than GitHub.
+
 The project is not yet packaged. Installation currently uses a checked-out
 clone and creates refreshable launchers under `~/.local/bin`.

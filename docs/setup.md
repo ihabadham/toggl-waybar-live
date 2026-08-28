@@ -1,8 +1,8 @@
 # Setup
 
 The first release uses a checked-out clone, Cloudflare's free Workers platform,
-and a Toggl webhook. Nothing deploys from GitHub, and GitHub never receives
-Cloudflare credentials.
+and a Toggl webhook. Cloudflare Workers Builds deploys reviewed changes from
+`main`; GitHub never receives Cloudflare credentials.
 
 ## Install dependencies
 
@@ -19,7 +19,7 @@ Authenticate Wrangler and deploy from this repository:
 
 ```sh
 npx wrangler login
-npx wrangler deploy --config worker/wrangler.jsonc
+npm run deploy
 ```
 
 Copy the resulting HTTPS Worker URL. The webhook callback is that URL followed
@@ -108,6 +108,36 @@ rm .webhook-secret .webhook-request.json .webhook-response.json .toggl-netrc
 
 Keep the returned workspace and subscription IDs for removal.
 
+## Enable automatic Worker deployment
+
+Connect the existing Worker to the Git repository using Cloudflare Workers
+Builds:
+
+1. In Cloudflare, open **Workers & Pages** and select the Worker.
+2. Open **Settings > Builds**, select **Connect**, and authorize the Cloudflare
+   GitHub App if prompted.
+3. Select this repository and use these build settings:
+
+   | Setting | Value |
+   | --- | --- |
+   | Production branch | `main` |
+   | Root directory | `/` |
+   | Build command | `npm ci` |
+   | Deploy command | `npm run deploy` |
+
+4. Under **Settings > Build > Branch control**, disable **Builds for
+   non-production branches**. Cloudflare does not provide preview URLs for
+   Workers that use Durable Objects, and pull requests are already verified by
+   GitHub Actions.
+
+The existing Worker name must match the `name` in `worker/wrangler.jsonc` or
+Cloudflare rejects the connection. Once connected, each push to protected
+`main` installs the exact lockfile and deploys the Worker.
+
+The relay bearer token, webhook signing secret, and target user ID remain
+runtime secrets in Cloudflare. They are not build variables and are preserved
+when a new code version is deployed.
+
 ## Enable the daemon
 
 ```sh
@@ -132,3 +162,8 @@ The webhook commands follow Toggl's [subscription request
 format](https://engineering.toggl.com/docs/track/webhooks_start/request_examples/).
 Cloudflare secrets are installed with Wrangler's [secret
 command](https://developers.cloudflare.com/workers/wrangler/commands/workers/#secret).
+Workers Builds follows Cloudflare's documented [Git integration
+flow](https://developers.cloudflare.com/workers/ci-cd/builds/) and [build
+configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/).
+The production-only branch setting follows Cloudflare's [build branch
+controls](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/).
