@@ -122,7 +122,7 @@ Builds:
    | --- | --- |
    | Production branch | `main` |
    | Root directory | `/` |
-   | Build command | `npm ci` |
+   | Build command | `npm run build` |
    | Deploy command | `npm run deploy` |
 
 4. Under **Settings > Build > Branch control**, disable **Builds for
