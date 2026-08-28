@@ -1,0 +1,4 @@
+trusted_actions:
+  - actions/checkout
+  - actions/setup-node
+  - gitleaks/gitleaks-action
