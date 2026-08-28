@@ -32,8 +32,9 @@ describe("Waybar rendering", () => {
     expect(output).toMatchObject({
       class: ["running", "connected"],
     });
-    expect(plainMarkup(output.text)).toBe("● PR review e… 01:23:45");
+    expect(plainMarkup(output.text)).toBe("● PR review e…  │ 01:23:45 ");
     expect(output.text).toContain('foreground="#E57CD8" alpha="100%"');
+    expect(output.text).toContain('background="#2B2321"');
   });
 
   it("ticks the entry and today's total locally", () => {
@@ -75,13 +76,15 @@ describe("Waybar rendering", () => {
       generatedAt,
       { labelMaxChars: 12 },
     );
-    expect(plainMarkup(idle.text)).toBe("○ Today 01:23:45");
+    expect(plainMarkup(idle.text)).toBe("○ Today  │ 01:23:45 ");
+    expect(idle.text).toContain('background="#28211F"');
 
     const stale = renderWaybar(rendererState({ connection: "stale" }), generatedAt, {
       labelMaxChars: 12,
     });
     expect(stale.class).toEqual(["running", "stale"]);
-    expect(plainMarkup(stale.text)).toBe("⚠ PR review e… 01:23:45");
+    expect(plainMarkup(stale.text)).toBe("⚠ PR review e…  │ 01:23:45 ");
+    expect(stale.text).toContain('background="#2B2718"');
     expect(plainMarkup(stale.tooltip)).toContain("Relay stale · full sync just now");
 
     const offline = renderWaybar(
@@ -117,7 +120,7 @@ describe("Waybar rendering", () => {
       generatedAt,
       { labelMaxChars: 2 },
     );
-    expect(plainMarkup(output.text)).toBe("● 🧪… 100:00:00");
+    expect(plainMarkup(output.text)).toBe("● 🧪…  │ 100:00:00 ");
   });
 
   it("pulses only the running activity dot", () => {

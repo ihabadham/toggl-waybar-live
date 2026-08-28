@@ -39,6 +39,10 @@ function colored(value: string, color: string): string {
   return `<span foreground="${color}">${value}</span>`;
 }
 
+function timerSegment(value: string, color: string, background: string): string {
+  return `<span foreground="${color}" background="${background}"> │ ${value} </span>`;
+}
+
 function elapsedSince(start: string, now: string): number {
   return Math.max(0, (Date.parse(now) - Date.parse(start)) / 1_000);
 }
@@ -127,7 +131,7 @@ function runningText(label: string, active: string, now: string): string {
   return [
     `<span foreground="#E57CD8" alpha="${pulseAlpha}">●</span>`,
     colored(escapeMarkup(label), "#C98CAF"),
-    colored(active, "#D5A59B"),
+    timerSegment(active, "#D5A59B", "#2B2321"),
   ].join(" ");
 }
 
@@ -149,8 +153,8 @@ export function renderWaybar(
     return {
       text:
         state.connection === "stale"
-          ? colored(`⚠ Today ${today}`, "#D6A84F")
-          : `${colored("○", "#D5A59B")} ${colored("Today", "#C98CAF")} ${colored(today, "#D5A59B")}`,
+          ? `${colored("⚠ Today", "#D6A84F")} ${timerSegment(today, "#D6A84F", "#2B2718")}`
+          : `${colored("○", "#D5A59B")} ${colored("Today", "#C98CAF")} ${timerSegment(today, "#D5A59B", "#28211F")}`,
       tooltip: tooltip(state, now),
       class: ["idle", state.connection],
     };
@@ -169,7 +173,7 @@ export function renderWaybar(
   return {
     text:
       state.connection === "stale"
-        ? colored(`⚠ ${escapeMarkup(label)} ${active}`, "#D6A84F")
+        ? `${colored(`⚠ ${escapeMarkup(label)}`, "#D6A84F")} ${timerSegment(active, "#D6A84F", "#2B2718")}`
         : runningText(label, active, now),
     tooltip: tooltip(state, now),
     class: ["running", state.connection],
