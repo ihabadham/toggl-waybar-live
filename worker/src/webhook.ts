@@ -39,8 +39,19 @@ function errorResponse(status: number, code: string): Response {
   return jsonResponse(status, { error: code });
 }
 
-function actionFromRequestType(value: unknown): EntryAction {
-  switch (value) {
+function actionFromMetadata(metadata: UnknownRecord): EntryAction {
+  switch (metadata.action) {
+    case "created":
+    case "started":
+      return "created";
+    case "updated":
+    case "stopped":
+      return "updated";
+    case "deleted":
+      return "deleted";
+  }
+
+  switch (metadata.request_type) {
     case "POST":
       return "created";
     case "PUT":
@@ -55,6 +66,14 @@ function actionFromRequestType(value: unknown): EntryAction {
 
 function normalizeId(value: unknown): string {
   return externalIdSchema.parse(value);
+}
+
+function normalizeEventId(value: unknown): string {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return BigInt(value).toString();
+  }
+
+  return normalizeId(value);
 }
 
 function normalizeOptionalId(value: unknown): string | null {
@@ -101,14 +120,14 @@ function normalizeDuration(
 }
 
 function normalizeEvent(envelope: UnknownRecord, metadata: UnknownRecord): NormalizedEvent {
-  const action = actionFromRequestType(metadata.request_type);
+  const action = actionFromMetadata(metadata);
   if (!isRecord(envelope.payload)) {
     throw new Error("Webhook payload must be an object");
   }
 
   const payload = envelope.payload;
   const eventEnvelope = {
-    eventId: envelope.event_id,
+    eventId: normalizeEventId(envelope.event_id),
     eventCreatedAt: envelope.created_at,
     deliveredAt: envelope.timestamp,
     callbackUrl: envelope.url_callback,

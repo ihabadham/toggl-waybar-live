@@ -118,10 +118,57 @@ describe("Toggl webhook ingress", () => {
     ]);
   });
 
+  it("normalizes Toggl's action-based created event", async () => {
+    const collector = createCollector();
+    const created = envelope({
+      event_id: Number.MAX_SAFE_INTEGER + 2,
+      metadata: { action: "created", event_user_id: 303 },
+    });
+
+    const response = await handleWebhook(
+      await signedRequest(created),
+      env,
+      collector.applyEvent,
+      now,
+    );
+
+    expect(response.status).toBe(204);
+    expect(collector.applied[0]).toMatchObject({
+      action: "created",
+      eventId: String(Number.MAX_SAFE_INTEGER + 2),
+      entry: { id: "101", stop: null },
+    });
+  });
+
   it("normalizes a stopped entry", async () => {
     const collector = createCollector();
     const stopped = envelope({
       metadata: { request_type: "PATCH", event_user_id: 303 },
+      payload: {
+        ...baseEntry,
+        stop: "2026-08-27T18:35:00Z",
+        duration: 300,
+      },
+    });
+
+    const response = await handleWebhook(
+      await signedRequest(stopped),
+      env,
+      collector.applyEvent,
+      now,
+    );
+
+    expect(response.status).toBe(204);
+    expect(collector.applied[0]).toMatchObject({
+      action: "updated",
+      entry: { stop: "2026-08-27T18:35:00Z", durationSeconds: 300 },
+    });
+  });
+
+  it("normalizes Toggl's action-based stopped event", async () => {
+    const collector = createCollector();
+    const stopped = envelope({
+      metadata: { action: "stopped", event_user_id: 303 },
       payload: {
         ...baseEntry,
         stop: "2026-08-27T18:35:00Z",

@@ -15,7 +15,20 @@ export default {
 
     if (url.pathname === "/webhooks/toggl") {
       const relay = env.RELAY.get(env.RELAY.idFromName(relayObjectName));
-      return handleWebhook(request, env, (event) => relay.applyEvent(event));
+      const response = await handleWebhook(request, env, (event) => relay.applyEvent(event));
+
+      if (!response.ok) {
+        const body = (await response.clone().json()) as { error?: unknown };
+        console.warn(
+          JSON.stringify({
+            event: "webhook_rejected",
+            status: response.status,
+            code: typeof body.error === "string" ? body.error : "unknown",
+          }),
+        );
+      }
+
+      return response;
     }
 
     if (request.method === "GET" && url.pathname === "/ws") {
