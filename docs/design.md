@@ -28,14 +28,16 @@ The module has four primary states:
 
 | State | Example |
 | --- | --- |
-| Running and connected | `● PR review… │ 01:23:45` |
+| Running and connected | `● PR review… │ 01:23:45 · Σ05:42` |
 | Idle and connected | `○ Today │ 05:42:17` |
-| Running from stale state | `⚠ PR review… │ 01:23:45` |
+| Running from stale state | `⚠ PR review… │ 01:23:45 · Σ05:42` |
 | No usable state | `● Toggl offline` |
 
 The visible entry label defaults to 12 characters, including an ellipsis when
 truncated. It uses the description first, then the project name, then
-`Running`. The timer uses `HH:MM:SS` and advances locally once per second.
+`Running`. The active timer uses `HH:MM:SS` and advances locally once per
+second. Running states append today's cumulative total as `ΣHH:MM`; minute
+precision keeps the total glanceable without crowding the bar.
 
 The tooltip contains the untruncated description, project, start time, today's
 total, last synchronization time, and connection state. A stale running timer
