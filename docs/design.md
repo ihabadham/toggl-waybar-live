@@ -318,12 +318,11 @@ Cloudflare Workers Builds installs the locked dependencies and runs the
 repository's `npm run deploy` command. Cloudflare owns the build credential;
 GitHub stores no Cloudflare token or account ID.
 
-Production builds deploy the Worker, while non-production builds upload an
-unpromoted version and report their status on the pull request. Cloudflare does
-not generate preview URLs for Workers that use Durable Objects, so these builds
-verify the hosted packaging path without producing a separately runnable
-preview. Runtime secrets are managed separately in Cloudflare and remain
-attached across code deployments.
+Only the production branch is connected. Non-production branch builds are
+disabled because Cloudflare does not generate preview URLs for Workers that use
+Durable Objects, while GitHub Actions already verifies the complete local path.
+Runtime secrets are managed separately in Cloudflare and remain attached across
+code deployments.
 
 Packaging, automatic releases, multi-distribution installation, and a
 generalized setup wizard remain deferred. Worker code deployment is automated

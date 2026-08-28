@@ -124,13 +124,11 @@ Builds:
    | Root directory | `/` |
    | Build command | `npm run build` |
    | Deploy command | `npm run deploy` |
-   | Version command | `npm run upload` |
 
-4. Under **Settings > Build > Branch control**, enable **Builds for
-   non-production branches**. These builds upload an unpromoted Worker version
-   and report their status on the pull request. Cloudflare does not provide a
-   preview URL for Workers that use Durable Objects, so this verifies the hosted
-   build without exposing a separately runnable preview.
+4. Under **Settings > Build > Branch control**, disable **Builds for
+   non-production branches**. Cloudflare does not provide preview URLs for
+   Workers that use Durable Objects, and pull requests are already verified by
+   GitHub Actions.
 
 The existing Worker name must match the `name` in `worker/wrangler.jsonc` or
 Cloudflare rejects the connection. Once connected, each push to protected
