@@ -9,7 +9,7 @@ strict request budget. Any number of Waybar renderers read the same private
 runtime file and advance the timer locally once per second.
 
 ```text
-● PR review e… │ 01:23:45
+● PR review e… │ 01:23:45 · Σ05:42
 ○ Today │ 05:42:17
 ```
 

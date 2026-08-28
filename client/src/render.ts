@@ -18,6 +18,13 @@ function formatDuration(seconds: number): string {
   return [hours, minutes, remainingSeconds].map((part) => String(part).padStart(2, "0")).join(":");
 }
 
+function formatCompactDuration(seconds: number): string {
+  const wholeMinutes = Math.max(0, Math.floor(seconds / 60));
+  const hours = Math.floor(wholeMinutes / 60);
+  const minutes = wholeMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
 function truncate(value: string, limit: number): string {
   const characters = Array.from(value);
   if (characters.length <= limit) {
@@ -170,11 +177,12 @@ export function renderWaybar(
 
   const label = truncate(state.label || "Running", options.labelMaxChars);
   const active = formatDuration(elapsedSince(state.entryStart, now));
+  const compactToday = formatCompactDuration(todayAt(state, now));
   return {
     text:
       state.connection === "stale"
-        ? `${colored(`⚠ ${escapeMarkup(label)}`, "#D6A84F")} ${timerSegment(active, "#D6A84F", "#2B2718")}`
-        : runningText(label, active, now),
+        ? `${colored(`⚠ ${escapeMarkup(label)}`, "#D6A84F")} ${timerSegment(active, "#D6A84F", "#2B2718")}${colored(`· Σ${compactToday}`, "#D6A84F")}`
+        : `${runningText(label, active, now)}${colored(`· Σ${compactToday}`, "#A99D88")}`,
     tooltip: tooltip(state, now),
     class: ["running", state.connection],
   };

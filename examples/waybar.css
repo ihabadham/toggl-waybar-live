@@ -11,6 +11,7 @@
 }
 
 #custom-toggl.running {
+  padding-right: 8px;
   color: #c98caf;
   background-color: rgba(201, 140, 175, 0.1);
 }

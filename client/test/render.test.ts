@@ -32,7 +32,7 @@ describe("Waybar rendering", () => {
     expect(output).toMatchObject({
       class: ["running", "connected"],
     });
-    expect(plainMarkup(output.text)).toBe("● PR review e…  │ 01:23:45 ");
+    expect(plainMarkup(output.text)).toBe("● PR review e…  │ 01:23:45 · Σ01:23");
     expect(output.text).toContain('foreground="#E57CD8" alpha="100%"');
     expect(output.text).toContain('background="#2B2321"');
   });
@@ -43,6 +43,7 @@ describe("Waybar rendering", () => {
     });
 
     expect(plainMarkup(output.text)).toContain("01:23:50");
+    expect(plainMarkup(output.text)).toContain("Σ01:23");
     expect(plainMarkup(output.tooltip)).toContain("Today     01:23:50");
     expect(output.tooltip).toContain("<b>PR review extremely long</b>");
     expect(plainMarkup(output.tooltip)).toContain("Relay connected · full sync just now");
@@ -83,7 +84,7 @@ describe("Waybar rendering", () => {
       labelMaxChars: 12,
     });
     expect(stale.class).toEqual(["running", "stale"]);
-    expect(plainMarkup(stale.text)).toBe("⚠ PR review e…  │ 01:23:45 ");
+    expect(plainMarkup(stale.text)).toBe("⚠ PR review e…  │ 01:23:45 · Σ01:23");
     expect(stale.text).toContain('background="#2B2718"');
     expect(plainMarkup(stale.tooltip)).toContain("Relay stale · full sync just now");
 
@@ -120,7 +121,16 @@ describe("Waybar rendering", () => {
       generatedAt,
       { labelMaxChars: 2 },
     );
-    expect(plainMarkup(output.text)).toBe("● 🧪…  │ 100:00:00 ");
+    expect(plainMarkup(output.text)).toBe("● 🧪…  │ 100:00:00 · Σ01:23");
+  });
+
+  it("floors the compact total to minutes and advances across a minute boundary", () => {
+    const state = rendererState({ todayTrackedSeconds: 45_659 });
+    const before = renderWaybar(state, generatedAt, { labelMaxChars: 12 });
+    const after = renderWaybar(state, "2026-08-27T12:00:01Z", { labelMaxChars: 12 });
+
+    expect(plainMarkup(before.text)).toContain("Σ12:40");
+    expect(plainMarkup(after.text)).toContain("Σ12:41");
   });
 
   it("pulses only the running activity dot", () => {
@@ -159,6 +169,7 @@ describe("Waybar rendering", () => {
     );
 
     expect(output.text).toContain("15:30:00");
+    expect(plainMarkup(output.text)).toContain("Σ00:00");
     expect(plainMarkup(output.tooltip)).toContain("Today     00:00:00");
   });
 });
