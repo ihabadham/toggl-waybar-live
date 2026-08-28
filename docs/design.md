@@ -28,10 +28,10 @@ The module has four primary states:
 
 | State | Example |
 | --- | --- |
-| Running and connected | `▶ PR review… 01:23:45` |
-| Idle and connected | `Today 05:42:17` |
-| Running from stale state | `⚠ PR review… 01:23:45` |
-| No usable state | `Toggl offline` |
+| Running and connected | `● PR review… │ 01:23:45` |
+| Idle and connected | `○ Today │ 05:42:17` |
+| Running from stale state | `⚠ PR review… │ 01:23:45` |
+| No usable state | `● Toggl offline` |
 
 The visible entry label defaults to 12 characters, including an ellipsis when
 truncated. It uses the description first, then the project name, then

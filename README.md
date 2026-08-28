@@ -9,8 +9,8 @@ strict request budget. Any number of Waybar renderers read the same private
 runtime file and advance the timer locally once per second.
 
 ```text
-▶ PR review e… 01:23:45
-Today 05:42:17
+● PR review e… │ 01:23:45
+○ Today │ 05:42:17
 ```
 
 The first supported desktop is Fedora with Sway, Waybar, and a systemd user

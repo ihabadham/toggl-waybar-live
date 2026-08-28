@@ -179,6 +179,10 @@ function latestRendererText(index) {
   return rendererLines[index].at(-1)?.text ?? "";
 }
 
+function latestRendererHasClass(index, className) {
+  return rendererLines[index].at(-1)?.class?.includes(className) ?? false;
+}
+
 async function readRuntimeState() {
   try {
     return JSON.parse(
@@ -259,7 +263,11 @@ try {
 
   await waitFor(
     "both running renderers",
-    () => rendererLines.every((_lines, index) => latestRendererText(index).startsWith("▶ Simulation")),
+    () =>
+      rendererLines.every(
+        (_lines, index) =>
+          latestRendererHasClass(index, "running") && latestRendererText(index).includes("Simulation"),
+      ),
   );
   const beforeTick = rendererLines.map((_lines, index) => latestRendererText(index));
   const requestsBeforeTick = fakeApiRequests;
@@ -293,7 +301,7 @@ try {
   assert(stopResponse.status === 204, `Stop webhook returned ${stopResponse.status}`);
   await waitFor(
     "both idle renderers",
-    () => rendererLines.every((_lines, index) => latestRendererText(index).startsWith("Today ")),
+    () => rendererLines.every((_lines, index) => latestRendererHasClass(index, "idle")),
   );
 
   todayEntries = [];
@@ -301,7 +309,11 @@ try {
   assert(deleteResponse.status === 204, `Delete webhook returned ${deleteResponse.status}`);
   await waitFor(
     "deleted entry total",
-    () => rendererLines.every((_lines, index) => latestRendererText(index) === "Today 00:00:00"),
+    () =>
+      rendererLines.every(
+        (_lines, index) =>
+          latestRendererHasClass(index, "idle") && latestRendererText(index).includes("00:00:00"),
+      ),
   );
 
   await terminate(worker);
