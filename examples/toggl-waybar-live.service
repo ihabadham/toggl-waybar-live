@@ -1,0 +1,14 @@
+[Unit]
+Description=Live Toggl state for Waybar
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/toggl-waybar-live/env
+ExecStart=%h/.local/bin/toggl-waybar-daemon
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=graphical-session.target

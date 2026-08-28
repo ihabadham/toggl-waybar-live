@@ -1,0 +1,30 @@
+{
+  "name": "toggl-waybar-live",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "worker",
+    "client"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.8.0",
+  "scripts": {
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build -w shared && npm run build -w client && npm run build -w worker",
+    "deploy": "npm run build -w shared && npm run deploy -w worker",
+    "check": "npm run build -w shared && npm run lint && npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.10",
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}

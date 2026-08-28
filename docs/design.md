@@ -28,10 +28,10 @@ The module has four primary states:
 
 | State | Example |
 | --- | --- |
-| Running and connected | `▶ PR review… 01:23:45` |
-| Idle and connected | `Today 05:42:17` |
-| Running from stale state | `⚠ PR review… 01:23:45` |
-| No usable state | `Toggl offline` |
+| Running and connected | `● PR review… │ 01:23:45` |
+| Idle and connected | `○ Today │ 05:42:17` |
+| Running from stale state | `⚠ PR review… │ 01:23:45` |
+| No usable state | `● Toggl offline` |
 
 The visible entry label defaults to 12 characters, including an ellipsis when
 truncated. It uses the description first, then the project name, then
@@ -313,12 +313,20 @@ must be measured before the README describes the integration as real-time.
 ## Delivery and operations
 
 GitHub Actions runs formatting, linting, type checking, tests, and secret
-scanning. It does not deploy. Cloudflare deployment uses the developer's local
-Wrangler OAuth session, keeping Cloudflare credentials out of GitHub.
+scanning on pull requests. After a reviewed change reaches protected `main`,
+Cloudflare Workers Builds installs the locked dependencies and runs the
+repository's `npm run deploy` command. Cloudflare owns the build credential;
+GitHub stores no Cloudflare token or account ID.
 
-The first release proves manual setup end to end. Packaging, automatic releases,
-multi-distribution installation, and a generalized setup wizard are deferred
-until the working path exposes what should actually be automated.
+Only the production branch is connected. Non-production branch builds are
+disabled because Cloudflare does not generate preview URLs for Workers that use
+Durable Objects, while GitHub Actions already verifies the complete local path.
+Runtime secrets are managed separately in Cloudflare and remain attached across
+code deployments.
+
+Packaging, automatic releases, multi-distribution installation, and a
+generalized setup wizard remain deferred. Worker code deployment is automated
+because the production path and rollback behavior are now established.
 
 ## References
 

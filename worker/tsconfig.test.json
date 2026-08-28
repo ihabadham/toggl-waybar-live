@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/vitest-plugin/types", "vitest"]
+  },
+  "include": [
+    "worker-configuration.d.ts",
+    "src/signature.ts",
+    "src/webhook.ts",
+    "src/env.ts",
+    "test/**/*.ts"
+  ]
+}

@@ -1,0 +1,32 @@
+#custom-toggl {
+  margin-top: 2px;
+  margin-bottom: 2px;
+  padding-left: 8px;
+  padding-right: 0;
+  color: #c98caf;
+  border-bottom-color: transparent;
+  border-radius: 5px;
+  background-color: rgba(201, 140, 175, 0.1);
+  font-weight: 600;
+}
+
+#custom-toggl.running {
+  color: #c98caf;
+  background-color: rgba(201, 140, 175, 0.1);
+}
+
+#custom-toggl.idle {
+  color: #c98caf;
+  background-color: rgba(213, 165, 155, 0.08);
+}
+
+#custom-toggl.stale {
+  color: #d6a84f;
+  background-color: rgba(214, 168, 79, 0.1);
+}
+
+#custom-toggl.offline {
+  padding-right: 8px;
+  color: #937a5c;
+  background-color: rgba(147, 122, 92, 0.08);
+}

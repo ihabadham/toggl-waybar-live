@@ -1,0 +1,9 @@
+{
+  "modules-right": ["pulseaudio", "network", "cpu", "memory", "custom/toggl", "clock", "tray"],
+  "custom/toggl": {
+    "exec": "TOGGL_LABEL_MAX_CHARS=12 ~/.local/bin/toggl-waybar-render",
+    "return-type": "json",
+    "restart-interval": 5,
+    "tooltip": true
+  }
+}

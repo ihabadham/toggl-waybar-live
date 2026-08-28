@@ -1,0 +1,172 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+for required_command in node npm openssl mktemp sed dirname mkdir rm chmod mv; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    printf 'Required command not found: %s\n' "$required_command" >&2
+    exit 1
+  fi
+done
+node_binary=$(command -v node)
+case "$node_binary" in
+  /*) ;;
+  *)
+    printf 'Node must resolve to an absolute executable path.\n' >&2
+    exit 1
+    ;;
+esac
+
+script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(dirname -- "$script_directory")
+config_root=${XDG_CONFIG_HOME:-"$HOME/.config"}
+config_directory=$config_root/toggl-waybar-live
+environment_file=$config_directory/env
+unit_directory=$config_root/systemd/user
+unit_file=$unit_directory/toggl-waybar-live.service
+binary_directory=${TOGGL_WAYBAR_BIN_DIR:-"$HOME/.local/bin"}
+case "$config_root$binary_directory" in
+  *[[:space:]]*)
+    printf 'Configuration and binary paths must not contain whitespace.\n' >&2
+    exit 1
+    ;;
+esac
+for target in \
+  "$environment_file" \
+  "$unit_file" \
+  "$binary_directory/toggl-waybar-daemon" \
+  "$binary_directory/toggl-waybar-render"
+do
+  if [ -L "$target" ]; then
+    printf 'Refusing to replace symlink: %s\n' "$target" >&2
+    exit 1
+  fi
+done
+
+printf 'Relay WebSocket URL (wss://.../ws): '
+IFS= read -r relay_url
+case "$relay_url" in
+  wss://*) ;;
+  *)
+    printf 'Relay URL must use wss:// and cannot be an example placeholder.\n' >&2
+    exit 1
+    ;;
+esac
+if ! node -e '
+  const url = new URL(process.argv[1]);
+  if (url.protocol !== "wss:" || url.pathname !== "/ws" || url.search || url.hash || url.username || url.password) {
+    process.exit(1);
+  }
+' "$relay_url"; then
+  printf 'Relay URL must be a plain wss:// URL ending in /ws.\n' >&2
+  exit 1
+fi
+case "$relay_url" in
+  *your-worker* | *[[:space:]]*)
+    printf 'Relay URL must use wss:// and cannot be an example placeholder.\n' >&2
+    exit 1
+    ;;
+esac
+printf 'IANA timezone (for example Africa/Cairo): '
+IFS= read -r timezone
+case "$timezone" in
+  "" | Region/City | *[!A-Za-z0-9_+./-]* | /* | */)
+    printf 'Timezone must be a non-empty IANA name such as Africa/Cairo.\n' >&2
+    exit 1
+    ;;
+esac
+if ! node -e '
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: process.argv[1] }).format();
+  } catch {
+    process.exit(1);
+  }
+' "$timezone"; then
+  printf 'Timezone must be a valid IANA timezone.\n' >&2
+  exit 1
+fi
+
+printf 'Toggl API token: '
+if [ -t 0 ]; then
+  stty -echo
+  trap 'stty echo 2>/dev/null || true' EXIT HUP INT TERM
+fi
+IFS= read -r api_token
+if [ -t 0 ]; then
+  stty echo
+  trap - EXIT HUP INT TERM
+fi
+printf '\n'
+case "$api_token" in
+  "" | replace-with-your-toggl-api-token | *[[:space:]]*)
+    printf 'Toggl API token cannot be empty or an example placeholder.\n' >&2
+    exit 1
+    ;;
+esac
+
+relay_token=
+if [ -f "$environment_file" ]; then
+  relay_token=$(sed -n 's/^TOGGL_RELAY_TOKEN=//p' "$environment_file" | sed -n '1p')
+fi
+if [ "${#relay_token}" -ne 64 ]; then
+  relay_token=
+fi
+case "$relay_token" in
+  "" | *[!0-9a-f]*) relay_token=$(openssl rand -hex 32) ;;
+esac
+
+printf 'Building the local client...\n'
+(cd "$repository_root" && npm run build -w shared && npm run build -w client)
+
+mkdir -p "$config_directory" "$unit_directory" "$binary_directory"
+environment_temporary=$(mktemp "$config_directory/.env.XXXXXX")
+unit_temporary=$(mktemp "$unit_directory/.service.XXXXXX")
+daemon_temporary=$(mktemp "$binary_directory/.daemon.XXXXXX")
+renderer_temporary=$(mktemp "$binary_directory/.renderer.XXXXXX")
+trap 'rm -f "$environment_temporary" "$unit_temporary" "$daemon_temporary" "$renderer_temporary"' EXIT HUP INT TERM
+
+{
+  printf 'TOGGL_API_TOKEN=%s\n' "$api_token"
+  printf 'TOGGL_TIMEZONE=%s\n' "$timezone"
+  printf 'TOGGL_RELAY_URL=%s\n' "$relay_url"
+  printf 'TOGGL_RELAY_TOKEN=%s\n' "$relay_token"
+} >"$environment_temporary"
+
+{
+  printf '%s\n' '[Unit]'
+  printf '%s\n' 'Description=Live Toggl state for Waybar'
+  printf '%s\n' 'After=graphical-session.target'
+  printf '%s\n\n' 'PartOf=graphical-session.target'
+  printf '%s\n' '[Service]'
+  printf '%s\n' 'Type=simple'
+  printf 'EnvironmentFile=%s\n' "$environment_file"
+  printf 'ExecStart=%s/toggl-waybar-daemon\n' "$binary_directory"
+  printf '%s\n' 'Restart=on-failure'
+  printf '%s\n\n' 'RestartSec=5s'
+  printf '%s\n' '[Install]'
+  printf '%s\n' 'WantedBy=graphical-session.target'
+} >"$unit_temporary"
+
+{
+  printf '%s\n' '#!/bin/sh'
+  printf 'exec "%s" "%s/client/dist/daemon.js" "$@"\n' "$node_binary" "$repository_root"
+} >"$daemon_temporary"
+
+{
+  printf '%s\n' '#!/bin/sh'
+  printf 'exec "%s" "%s/client/dist/renderer.js" "$@"\n' "$node_binary" "$repository_root"
+} >"$renderer_temporary"
+
+chmod 0600 "$environment_temporary"
+chmod 0644 "$unit_temporary"
+chmod 0755 "$daemon_temporary" "$renderer_temporary"
+mv -f "$environment_temporary" "$environment_file"
+mv -f "$unit_temporary" "$unit_file"
+mv -f "$daemon_temporary" "$binary_directory/toggl-waybar-daemon"
+mv -f "$renderer_temporary" "$binary_directory/toggl-waybar-render"
+trap - EXIT HUP INT TERM
+
+printf 'Installed local config, user service, and launchers.\n'
+printf 'Relay token was generated or preserved without being printed.\n'
+printf 'Next: configure Cloudflare, then enable the user service and add the Waybar module.\n'
