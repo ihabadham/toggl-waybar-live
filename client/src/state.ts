@@ -1,6 +1,7 @@
 import type { NormalizedEntry, RelayMessage, RunningSnapshot } from "@toggl-waybar-live/shared";
 
 import { type DayWindow, instantBelongsToDay } from "./day-window.js";
+import type { RichTogglEntry } from "./toggl-api.js";
 
 export type ConnectionState = "connected" | "stale" | "offline";
 
@@ -20,6 +21,8 @@ export interface ClientState {
   dayKey: string;
   entries: Map<string, NormalizedEntry>;
   lastSynchronizedAt: string | null;
+  pending: "stopping" | "resuming" | null;
+  stoppedEntryIds: ReadonlySet<string>;
 }
 
 export interface RendererState {
@@ -33,6 +36,7 @@ export interface RendererState {
   runningContributesToToday: boolean;
   generatedAt: string;
   lastSynchronizedAt: string | null;
+  pending?: "stopping" | "resuming" | null;
 }
 
 export function createState(dayKey: string): ClientState {
@@ -43,7 +47,16 @@ export function createState(dayKey: string): ClientState {
     dayKey,
     entries: new Map(),
     lastSynchronizedAt: null,
+    pending: null,
+    stoppedEntryIds: new Set(),
   };
+}
+
+export function setPending(
+  state: ClientState,
+  pending: "stopping" | "resuming" | null,
+): ClientState {
+  return state.pending === pending ? state : { ...state, pending };
 }
 
 export function setConnection(state: ClientState, connection: ConnectionState): ClientState {
@@ -86,6 +99,12 @@ export function applyRelayMessage(
 ): ClientState {
   const state = rotateDay(initialState, window);
   if (message.type === "snapshot") {
+    if (
+      message.snapshot.status === "running" &&
+      state.stoppedEntryIds.has(message.snapshot.entryId)
+    ) {
+      return state;
+    }
     return {
       ...state,
       current:
@@ -103,29 +122,133 @@ export function applyRelayMessage(
   }
 
   const entry = message.change.entry;
+  const known = state.entries.get(entry.id);
+  const mergedEntry: NormalizedEntry = {
+    ...known,
+    ...entry,
+    projectName: entry.projectName ?? known?.projectName ?? null,
+  };
   if (instantBelongsToDay(entry.start, window)) {
-    entries.set(entry.id, entry);
+    entries.set(entry.id, mergedEntry);
   } else {
     entries.delete(entry.id);
   }
 
+  const entryStopped = entry.stop !== null;
   const current =
-    state.current?.id === entry.id
-      ? {
-          id: entry.id,
-          workspaceId: entry.workspaceId,
-          projectId: entry.projectId,
-          projectName: entry.projectName,
-          description: entry.description,
-          start: entry.start,
-        }
-      : state.current;
+    state.current?.id === entry.id && entryStopped
+      ? null
+      : state.current?.id === entry.id
+        ? {
+            id: entry.id,
+            workspaceId: entry.workspaceId,
+            projectId: entry.projectId,
+            projectName: entry.projectName ?? state.current.projectName,
+            description: entry.description,
+            start: entry.start,
+          }
+        : state.current;
   return {
     ...state,
     current,
     currentContributesToToday:
       current === null ? false : instantBelongsToDay(current.start, window),
     entries,
+    stoppedEntryIds: entryStopped
+      ? new Set([...state.stoppedEntryIds, entry.id])
+      : state.stoppedEntryIds,
+  };
+}
+
+function currentFromEntry(entry: NormalizedEntry): CurrentEntry {
+  return {
+    id: entry.id,
+    workspaceId: entry.workspaceId,
+    projectId: entry.projectId,
+    projectName: entry.projectName,
+    description: entry.description,
+    start: entry.start,
+  };
+}
+
+function withTodayEntry(
+  state: ClientState,
+  entry: NormalizedEntry,
+  window: DayWindow,
+): Map<string, NormalizedEntry> {
+  const entries = new Map(state.entries);
+  if (instantBelongsToDay(entry.start, window)) {
+    entries.set(entry.id, entry);
+  } else {
+    entries.delete(entry.id);
+  }
+  return entries;
+}
+
+export function applyRichCreateResult(
+  initialState: ClientState,
+  entry: RichTogglEntry,
+  window: DayWindow,
+): ClientState {
+  const state = rotateDay(initialState, window);
+  if (state.current !== null && state.current.id !== entry.id) {
+    return state;
+  }
+  const stoppedEntryIds = new Set(state.stoppedEntryIds);
+  stoppedEntryIds.delete(entry.id);
+  return {
+    ...state,
+    current: currentFromEntry(entry),
+    currentContributesToToday: instantBelongsToDay(entry.start, window),
+    entries: withTodayEntry(state, entry, window),
+    stoppedEntryIds,
+  };
+}
+
+export function applyRichStopResult(
+  initialState: ClientState,
+  entry: RichTogglEntry,
+  window: DayWindow,
+): ClientState {
+  const state = rotateDay(initialState, window);
+  return {
+    ...state,
+    current: state.current?.id === entry.id ? null : state.current,
+    currentContributesToToday:
+      state.current?.id === entry.id ? false : state.currentContributesToToday,
+    entries: withTodayEntry(state, entry, window),
+    stoppedEntryIds: new Set([...state.stoppedEntryIds, entry.id]),
+  };
+}
+
+export function applyConfirmedStoppedId(state: ClientState, entryId: string): ClientState {
+  return {
+    ...state,
+    current: state.current?.id === entryId ? null : state.current,
+    currentContributesToToday:
+      state.current?.id === entryId ? false : state.currentContributesToToday,
+    stoppedEntryIds: new Set([...state.stoppedEntryIds, entryId]),
+  };
+}
+
+export function applyConfirmedCurrent(
+  initialState: ClientState,
+  current: RichTogglEntry | null,
+  window: DayWindow,
+  synchronizedAt: string,
+): ClientState {
+  const state = rotateDay(initialState, window);
+  const stoppedEntryIds = new Set(state.stoppedEntryIds);
+  if (current !== null) {
+    stoppedEntryIds.delete(current.id);
+  }
+  return {
+    ...state,
+    current: current === null ? null : currentFromEntry(current),
+    currentContributesToToday: current !== null && instantBelongsToDay(current.start, window),
+    entries: current === null ? state.entries : withTodayEntry(state, current, window),
+    lastSynchronizedAt: synchronizedAt,
+    stoppedEntryIds,
   };
 }
 
@@ -160,6 +283,10 @@ export function replaceReconciledEntries(
     currentContributesToToday: current !== null && instantBelongsToDay(current.start, window),
     entries: today,
     lastSynchronizedAt: synchronizedAt,
+    stoppedEntryIds:
+      current === null
+        ? state.stoppedEntryIds
+        : new Set([...state.stoppedEntryIds].filter((id) => id !== current.id)),
   };
 }
 
@@ -188,7 +315,7 @@ export function replaceReconciledCurrent(
   };
 }
 
-function completedSeconds(entries: ReadonlyMap<string, NormalizedEntry>): number {
+export function completedSeconds(entries: ReadonlyMap<string, NormalizedEntry>): number {
   let total = 0;
   for (const entry of entries.values()) {
     if (entry.stop !== null) {
@@ -220,5 +347,6 @@ export function toRendererState(state: ClientState, generatedAt: string): Render
     runningContributesToToday,
     generatedAt,
     lastSynchronizedAt: state.lastSynchronizedAt,
+    pending: state.pending,
   };
 }

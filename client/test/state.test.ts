@@ -4,12 +4,18 @@ import { describe, expect, it } from "vitest";
 import { loadConfig, loadRendererOptions } from "../src/config.js";
 import { dayWindowAt } from "../src/day-window.js";
 import {
+  applyConfirmedCurrent,
+  applyConfirmedStoppedId,
   applyRelayMessage,
+  applyRichCreateResult,
+  applyRichStopResult,
   createState,
   replaceReconciledEntries,
   setConnection,
+  setPending,
   toRendererState,
 } from "../src/state.js";
+import type { RichTogglEntry } from "../src/toggl-api.js";
 
 const window = dayWindowAt("2026-08-27T12:00:00Z", "Africa/Cairo");
 
@@ -24,6 +30,19 @@ function entry(overrides: Partial<NormalizedEntry> = {}): NormalizedEntry {
     start: "2026-08-27T10:00:00Z",
     stop: null,
     durationSeconds: null,
+    ...overrides,
+  };
+}
+
+function richEntry(overrides: Partial<RichTogglEntry> = {}): RichTogglEntry {
+  return {
+    ...entry(),
+    taskId: "505",
+    taskName: "Review task",
+    tagIds: ["606"],
+    tags: ["focus"],
+    billable: false,
+    updatedAt: null,
     ...overrides,
   };
 }
@@ -60,6 +79,51 @@ describe("local day windows", () => {
 });
 
 describe("client state", () => {
+  it("applies rich creates and stops only to the matching current identity", () => {
+    const created = richEntry();
+    let state = applyRichCreateResult(createState(window.dayKey), created, window);
+    expect(state.current?.id).toBe("101");
+
+    const external = richEntry({ id: "202", description: "External" });
+    state = applyConfirmedCurrent(state, external, window, "2026-08-27T12:00:00Z");
+    state = applyRichStopResult(
+      state,
+      richEntry({ stop: "2026-08-27T12:00:00Z", durationSeconds: 7_200 }),
+      window,
+    );
+    expect(state.current?.id).toBe("202");
+
+    state = applyRichCreateResult(state, richEntry({ id: "303" }), window);
+    expect(state.current?.id).toBe("202");
+  });
+
+  it("keeps stopped IDs from being resurrected by late relay snapshots", () => {
+    let state = applyRichCreateResult(createState(window.dayKey), richEntry(), window);
+    state = applyConfirmedStoppedId(state, "101");
+    state = applyRelayMessage(state, runningSnapshot(entry()), window);
+    expect(state.current).toBeNull();
+
+    state = applyConfirmedCurrent(state, richEntry(), window, "2026-08-27T12:00:00Z");
+    expect(state.current?.id).toBe("101");
+  });
+
+  it("preserves rich metadata when a narrow relay echo arrives", () => {
+    let state = applyRichCreateResult(createState(window.dayKey), richEntry(), window);
+    state = applyRelayMessage(state, changed(entry({ projectName: null })), window);
+
+    expect(state.current?.projectName).toBe("Internal");
+    expect(state.entries.get("101")).toMatchObject({
+      projectName: "Internal",
+      taskName: "Review task",
+      tags: ["focus"],
+    });
+  });
+
+  it("projects pending state for renderers", () => {
+    const state = setPending(createState(window.dayKey), "resuming");
+    expect(toRendererState(state, "2026-08-27T12:00:00Z").pending).toBe("resuming");
+  });
+
   it("applies relay start and stop messages without losing the completed total", () => {
     const runningEntry = entry();
     let state = setConnection(createState(window.dayKey), "connected");

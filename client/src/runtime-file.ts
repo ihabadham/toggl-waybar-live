@@ -17,6 +17,7 @@ const rendererStateSchema = z.strictObject({
   runningContributesToToday: z.boolean(),
   generatedAt: z.iso.datetime({ offset: true }),
   lastSynchronizedAt: z.iso.datetime({ offset: true }).nullable(),
+  pending: z.enum(["stopping", "resuming"]).nullable().default(null),
 });
 
 export function defaultRuntimeStatePath(environment: NodeJS.ProcessEnv = process.env): string {
