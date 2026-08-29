@@ -191,17 +191,18 @@ export function applyRichCreateResult(
   window: DayWindow,
 ): ClientState {
   const state = rotateDay(initialState, window);
+  if (state.stoppedEntryIds.has(entry.id)) {
+    return state;
+  }
   if (state.current !== null && state.current.id !== entry.id) {
     return state;
   }
-  const stoppedEntryIds = new Set(state.stoppedEntryIds);
-  stoppedEntryIds.delete(entry.id);
   return {
     ...state,
     current: currentFromEntry(entry),
     currentContributesToToday: instantBelongsToDay(entry.start, window),
     entries: withTodayEntry(state, entry, window),
-    stoppedEntryIds,
+    stoppedEntryIds: state.stoppedEntryIds,
   };
 }
 

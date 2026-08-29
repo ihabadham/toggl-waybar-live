@@ -94,6 +94,14 @@ function runningSnapshot(value: RichTogglEntry): RelayMessage {
   };
 }
 
+function changed(value: RichTogglEntry): RelayMessage {
+  return {
+    version: 1,
+    type: "entry.changed",
+    change: { action: "updated", entry: value },
+  };
+}
+
 function api(overrides: Partial<CoordinatorApi> = {}): CoordinatorApi {
   return {
     fetchToday: vi.fn(async () => success([])),
@@ -154,7 +162,7 @@ describe("client coordinator", () => {
     expect(instance.snapshot().confidence).toBe("confirmed");
   });
 
-  it("serializes mutations and suppresses Toggle from ingress monotonic time", async () => {
+  it("suppresses Toggle from ingress monotonic time", async () => {
     const create = deferred<ApiResult<RichTogglEntry>>();
     const createRunningEntry = vi.fn(() => create.promise);
     const times = [100, 200];
@@ -170,6 +178,27 @@ describe("client coordinator", () => {
     await expect(first).resolves.toMatchObject({ outcome: "resumed" });
     await expect(second).resolves.toMatchObject({ outcome: "duplicate_suppressed" });
     expect(createRunningEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes two real API mutations", async () => {
+    const stopped = deferred<ApiResult<RichTogglEntry>>();
+    const created = deferred<ApiResult<RichTogglEntry>>();
+    const stopTimeEntry = vi.fn(() => stopped.promise);
+    const createRunningEntry = vi.fn(() => created.promise);
+    const instance = coordinator(api({ stopTimeEntry, createRunningEntry }), {
+      initialCurrent: entry(),
+    });
+
+    const stopCommand = instance.stop();
+    const resumeCommand = instance.resume();
+    await vi.waitFor(() => expect(stopTimeEntry).toHaveBeenCalledTimes(1));
+    expect(createRunningEntry).not.toHaveBeenCalled();
+
+    stopped.resolve(success(entry({ stop: "2026-08-27T12:10:00Z", durationSeconds: 600 })));
+    await expect(stopCommand).resolves.toMatchObject({ outcome: "stopped" });
+    await vi.waitFor(() => expect(createRunningEntry).toHaveBeenCalledTimes(1));
+    created.resolve(success(entry({ id: "102" })));
+    await expect(resumeCommand).resolves.toMatchObject({ outcome: "resumed" });
   });
 
   it("confirms stale state before choosing the Toggle action", async () => {
@@ -190,6 +219,34 @@ describe("client coordinator", () => {
     await expect(command).resolves.toMatchObject({ outcome: "stopped" });
     expect(fetchCurrent).toHaveBeenCalledTimes(1);
     expect(stopTimeEntry).toHaveBeenCalledWith("202", "400");
+  });
+
+  it("uses a newer relay timer when stale Toggle confirmation resolves late", async () => {
+    const confirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi.fn(() => confirmation.promise);
+    const stopTimeEntry = vi.fn(async (_workspaceId, entryId) =>
+      success(
+        entry({
+          id: entryId,
+          stop: "2026-08-27T12:10:00Z",
+          durationSeconds: 600,
+        }),
+      ),
+    );
+    const createRunningEntry = vi.fn(async () => success(entry()));
+    const instance = coordinator(api({ fetchCurrent, stopTimeEntry, createRunningEntry }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    const command = instance.toggle();
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(1));
+    instance.applyRelay(runningSnapshot(entry({ id: "700", description: "External" })));
+    confirmation.resolve(success(null));
+
+    await expect(command).resolves.toMatchObject({ outcome: "stopped" });
+    expect(stopTimeEntry).toHaveBeenCalledWith("202", "700");
+    expect(createRunningEntry).not.toHaveBeenCalled();
   });
 
   it("discards background timer data after either a relay revision or mutation acceptance", async () => {
@@ -243,10 +300,12 @@ describe("client coordinator", () => {
     expect(instance.snapshot().current?.id).toBe("202");
   });
 
-  it("keeps an external resume conflict and reconciles instead of installing the create", async () => {
+  it("discards conflict reconciliation when a newer relay timer arrives", async () => {
     const created = deferred<ApiResult<RichTogglEntry>>();
+    const reconciliation = deferred<ApiResult<RichTogglEntry | null>>();
     const external = entry({ id: "202", description: "External" });
-    const fetchCurrent = vi.fn(async () => success(external));
+    const newer = entry({ id: "203", description: "Newer external" });
+    const fetchCurrent = vi.fn(() => reconciliation.promise);
     const instance = coordinator(
       api({ createRunningEntry: vi.fn(() => created.promise), fetchCurrent }),
     );
@@ -255,10 +314,35 @@ describe("client coordinator", () => {
     await vi.waitFor(() => expect(instance.snapshot().pending).toBe("resuming"));
     instance.applyRelay(runningSnapshot(external));
     created.resolve(success(entry({ id: "303" })));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(1));
+    instance.applyRelay(runningSnapshot(newer));
+    reconciliation.resolve(success(external));
 
     await expect(command).resolves.toMatchObject({ outcome: "resumed" });
-    expect(instance.snapshot().current?.id).toBe("202");
+    expect(instance.snapshot().current?.id).toBe("203");
     expect(fetchCurrent).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a stop webhook beat a delayed successful create response", async () => {
+    const created = deferred<ApiResult<RichTogglEntry>>();
+    const running = entry({ id: "303" });
+    const instance = coordinator(api({ createRunningEntry: vi.fn(() => created.promise) }));
+
+    const command = instance.resume();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("resuming"));
+    instance.applyRelay(
+      changed({
+        ...running,
+        stop: "2026-08-27T12:00:01Z",
+        durationSeconds: 1,
+      }),
+    );
+    created.resolve(success(running));
+
+    await expect(command).resolves.toMatchObject({ outcome: "resumed" });
+    expect(instance.snapshot().current).toBeNull();
+    instance.applyRelay(runningSnapshot(running));
+    expect(instance.snapshot().current).toBeNull();
   });
 
   it("makes webhook echoes idempotent and rejects late resurrection after local stop", async () => {
@@ -283,6 +367,68 @@ describe("client coordinator", () => {
     expect(fetchCurrent).toHaveBeenCalledTimes(status === 404 ? 1 : 0);
   });
 
+  it("tombstones Stop 404 when current reconciliation finds a different timer", async () => {
+    const current = deferred<ApiResult<RichTogglEntry | null>>();
+    const original = entry({ id: "101" });
+    const external = entry({ id: "202", description: "External" });
+    const instance = coordinator(
+      api({
+        stopTimeEntry: vi.fn(async () => failure({ status: 404 })),
+        fetchCurrent: vi.fn(() => current.promise),
+      }),
+      { initialCurrent: original },
+    );
+
+    const command = instance.stop();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("stopping"));
+    current.resolve(success(external));
+
+    await expect(command).resolves.toMatchObject({ outcome: "stopped", error: null });
+    expect(instance.snapshot().current?.id).toBe("202");
+    instance.applyRelay(runningSnapshot(original));
+    expect(instance.snapshot().current?.id).toBe("202");
+  });
+
+  it("fails Stop 404 when current reconciliation still finds the target", async () => {
+    const original = entry({ id: "101" });
+    const instance = coordinator(
+      api({
+        stopTimeEntry: vi.fn(async () => failure({ status: 404 })),
+        fetchCurrent: vi.fn(async () => success(original)),
+      }),
+      { initialCurrent: original },
+    );
+
+    await expect(instance.stop()).resolves.toMatchObject({
+      outcome: "failed",
+      error: "request_failed",
+    });
+    expect(instance.snapshot().current?.id).toBe("101");
+  });
+
+  it("discards a late Stop 404 current result after a newer relay timer", async () => {
+    const current = deferred<ApiResult<RichTogglEntry | null>>();
+    const original = entry({ id: "101" });
+    const external = entry({ id: "202", description: "External" });
+    const instance = coordinator(
+      api({
+        stopTimeEntry: vi.fn(async () => failure({ status: 404 })),
+        fetchCurrent: vi.fn(() => current.promise),
+      }),
+      { initialCurrent: original },
+    );
+
+    const command = instance.stop();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("stopping"));
+    instance.applyRelay(runningSnapshot(external));
+    current.resolve(success(null));
+
+    await expect(command).resolves.toMatchObject({ outcome: "stopped", error: null });
+    expect(instance.snapshot().current?.id).toBe("202");
+    instance.applyRelay(runningSnapshot(original));
+    expect(instance.snapshot().current?.id).toBe("202");
+  });
+
   it("checks an ambiguous create exactly once and accepts a matching running activity", async () => {
     const matching = entry();
     const fetchCurrent = vi.fn(async () => success(matching));
@@ -292,6 +438,28 @@ describe("client coordinator", () => {
     await expect(instance.resume()).resolves.toMatchObject({ outcome: "resumed" });
     expect(fetchCurrent).toHaveBeenCalledTimes(1);
     expect(instance.snapshot()).toMatchObject({ confidence: "confirmed", error: null });
+  });
+
+  it("discards ambiguous-create confirmation after a newer relay timer", async () => {
+    const current = deferred<ApiResult<RichTogglEntry | null>>();
+    const external = entry({ id: "999", description: "External" });
+    const instance = coordinator(
+      api({
+        createRunningEntry: vi.fn(async () => failure({ mayHaveSucceeded: true })),
+        fetchCurrent: vi.fn(() => current.promise),
+      }),
+    );
+
+    const command = instance.resume();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("resuming"));
+    instance.applyRelay(runningSnapshot(external));
+    current.resolve(success(entry()));
+
+    await expect(command).resolves.toMatchObject({
+      outcome: "failed",
+      error: "request_failed",
+    });
+    expect(instance.snapshot().current?.id).toBe("999");
   });
 
   it("trusts a different current after ambiguous create", async () => {
@@ -358,6 +526,24 @@ describe("client coordinator", () => {
     await filled.reconcile("full");
     expect(persist).toHaveBeenCalledTimes(1);
     expect(filled.snapshot().presets[0]).toMatchObject({ description: "Review" });
+
+    const beforeToday = entry({
+      id: "808",
+      description: "Overnight",
+      start: "2026-08-26T20:00:00Z",
+    });
+    const overnight = coordinator(
+      api({
+        fetchToday: vi.fn(async () => success([])),
+        fetchCurrent: vi.fn(async () => success(beforeToday)),
+      }),
+      { initialPresets: [] },
+    );
+    await overnight.reconcile("full");
+    expect(overnight.snapshot().presets[0]).toMatchObject({
+      description: "Overnight",
+      lastUsedAt: "2026-08-26T20:00:00Z",
+    });
   });
 
   it("surfaces preset persistence failure without rolling back timer state", async () => {

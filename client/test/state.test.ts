@@ -107,6 +107,15 @@ describe("client state", () => {
     expect(state.current?.id).toBe("101");
   });
 
+  it("does not let a delayed create result clear a newer stop tombstone", () => {
+    const running = richEntry({ id: "303" });
+    let state = applyConfirmedStoppedId(createState(window.dayKey), running.id);
+    state = applyRichCreateResult(state, running, window);
+
+    expect(state.current).toBeNull();
+    expect(state.stoppedEntryIds.has(running.id)).toBe(true);
+  });
+
   it("preserves rich metadata when a narrow relay echo arrives", () => {
     let state = applyRichCreateResult(createState(window.dayKey), richEntry(), window);
     state = applyRelayMessage(state, changed(entry({ projectName: null })), window);

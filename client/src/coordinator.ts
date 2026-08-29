@@ -282,7 +282,7 @@ export class ClientCoordinator {
     }
     this.ambiguousCreateUnresolved = false;
     this.commit(next, { confidence: "confirmed", error: null });
-    await this.refreshPresets(today.data);
+    await this.refreshPresets([...today.data, ...(current.data === null ? [] : [current.data])]);
     return true;
   }
 
@@ -375,8 +375,16 @@ export class ClientCoordinator {
     if (this.state.connection === "connected" && this.confidence === "confirmed") {
       return true;
     }
+    const revision = this.timerRevision;
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
+    if (revision !== this.timerRevision) {
+      if (this.confidence === "confirmed") {
+        return true;
+      }
+      this.commit(this.state, { error: "state_unconfirmed" });
+      return false;
+    }
     if (!current.ok) {
       this.commit(this.state, {
         confidence: "uncertain",
@@ -425,15 +433,22 @@ export class ClientCoordinator {
     }
 
     if (stopped.status === 404) {
+      const revision = this.timerRevision;
       const current = await this.api.fetchCurrent();
       this.recordQuota(current);
+      if (revision !== this.timerRevision) {
+        return this.finishMissingStopFromCurrentState(target.id);
+      }
       if (current.ok) {
+        if (current.data?.id === target.id) {
+          this.commitRestCurrent(current.data, window);
+          this.commit(setPending(this.state, null), { error: "request_failed" });
+          return commandResult("failed", "request_failed");
+        }
         this.commitRestCurrent(current.data, window);
-        this.commit(setPending(this.state, null), { error: null });
-        return commandResult(
-          current.data === null ? "stopped" : "failed",
-          current.data === null ? null : "request_failed",
-        );
+        const next = setPending(applyConfirmedStoppedId(this.state, target.id), null);
+        this.commit(next, { error: null });
+        return commandResult("stopped");
       }
       const error = current.error === "request_failed" ? "state_unconfirmed" : apiError(current);
       this.commit(setPending(this.state, null), { confidence: "uncertain", error });
@@ -446,6 +461,16 @@ export class ClientCoordinator {
       error,
     });
     return commandResult("failed", error);
+  }
+
+  private finishMissingStopFromCurrentState(entryId: string): CommandResult {
+    if (this.state.current?.id === entryId) {
+      this.commit(setPending(this.state, null), { error: "request_failed" });
+      return commandResult("failed", "request_failed");
+    }
+    const next = setPending(applyConfirmedStoppedId(this.state, entryId), null);
+    this.commit(next, { error: null });
+    return commandResult("stopped");
   }
 
   private async resumeNow(presetId: string | null): Promise<CommandResult> {
@@ -496,8 +521,21 @@ export class ClientCoordinator {
       return commandResult("failed", error);
     }
 
+    const revision = this.timerRevision;
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
+    if (revision !== this.timerRevision) {
+      if (this.confidence !== "confirmed") {
+        this.ambiguousCreateUnresolved = true;
+      }
+      this.commit(setPending(this.state, null), {
+        error: this.confidence === "confirmed" ? "request_failed" : "ambiguous_create",
+      });
+      if (this.confidence !== "confirmed") {
+        return commandResult("failed", "ambiguous_create");
+      }
+      return commandResult("failed", "request_failed");
+    }
     if (!current.ok) {
       this.ambiguousCreateUnresolved = true;
       this.commit(setPending(this.state, null), {
@@ -518,8 +556,12 @@ export class ClientCoordinator {
   }
 
   private async reconcileCurrentWithinMutation(): Promise<void> {
+    const revision = this.timerRevision;
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
+    if (revision !== this.timerRevision) {
+      return;
+    }
     if (current.ok) {
       this.commitRestCurrent(current.data, this.window(this.now()));
     } else {
