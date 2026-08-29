@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import {
+  ControlClientError,
+  sendControlCommand,
+  type WatchController,
+  watchControlSnapshots,
+} from "./control-client.js";
+import {
+  type CommandResult,
+  type ControlRequest,
+  controlRequestSchema,
+} from "./control-protocol.js";
+import { drawerView } from "./drawer-view.js";
+
+type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
+
+export interface ControlCliDependencies {
+  invokeDrawer?: () => Promise<boolean>;
+  send?: (request: CommandRequest) => Promise<CommandResult>;
+  watch?: (onSnapshot: Parameters<typeof watchControlSnapshots>[0]) => WatchController;
+  writeError?: (value: string) => void;
+  writeOutput?: (value: string) => void;
+}
+
+function usage(): string {
+  return "Usage: toggl-waybar <toggle|stop|resume [preset-id]|watch>";
+}
+
+function parseArguments(arguments_: readonly string[]): ControlRequest | null {
+  let value: unknown;
+  if (arguments_.length === 1 && arguments_[0] === "toggle") {
+    value = { version: 1, type: "toggle" };
+  } else if (arguments_.length === 1 && arguments_[0] === "stop") {
+    value = { version: 1, type: "stop" };
+  } else if ((arguments_.length === 1 || arguments_.length === 2) && arguments_[0] === "resume") {
+    value = { version: 1, type: "resume", presetId: arguments_[1] ?? null };
+  } else if (arguments_.length === 1 && arguments_[0] === "watch") {
+    value = { version: 1, type: "watch" };
+  } else {
+    return null;
+  }
+  const parsed = controlRequestSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function defaultInvokeDrawer(): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("toggl-waybar-drawer", ["open"], {
+      shell: false,
+      stdio: "ignore",
+    });
+    child.once("spawn", () => {
+      child.unref();
+      resolve(true);
+    });
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        resolve(false);
+      } else {
+        reject(error);
+      }
+    });
+  });
+}
+
+function resultError(result: CommandResult): string {
+  return result.error === null ? "Toggl command failed" : `Toggl command failed: ${result.error}`;
+}
+
+export async function runControlCli(
+  arguments_: readonly string[],
+  dependencies: ControlCliDependencies = {},
+): Promise<number> {
+  const writeError = dependencies.writeError ?? ((value) => process.stderr.write(value));
+  const writeOutput = dependencies.writeOutput ?? ((value) => process.stdout.write(value));
+  const request = parseArguments(arguments_);
+  if (request === null) {
+    writeError(`${usage()}\n`);
+    return 2;
+  }
+
+  if (request.type === "watch") {
+    let latestConnected = false;
+    let latestSnapshot: Parameters<typeof drawerView>[0] | null = null;
+    const emit = (snapshot: Parameters<typeof drawerView>[0]): void => {
+      latestSnapshot = snapshot;
+      latestConnected = snapshot.error !== "daemon_unavailable";
+      writeOutput(`${JSON.stringify(drawerView(snapshot))}\n`);
+    };
+    const controller = (dependencies.watch ?? watchControlSnapshots)(emit);
+    const ticker = setInterval(() => {
+      if (latestConnected && latestSnapshot !== null) {
+        writeOutput(`${JSON.stringify(drawerView(latestSnapshot))}\n`);
+      }
+    }, 1_000);
+    await controller.done.finally(() => clearInterval(ticker));
+    return 0;
+  }
+
+  try {
+    const result = await (dependencies.send ?? sendControlCommand)(request);
+    if (result.outcome === "drawer_required") {
+      if (
+        request.type === "toggle" &&
+        (await (dependencies.invokeDrawer ?? defaultInvokeDrawer)())
+      ) {
+        return 0;
+      }
+      writeError(
+        request.type === "toggle"
+          ? "No resumable activity exists and toggl-waybar-drawer is not installed.\n"
+          : "No resumable activity exists.\n",
+      );
+      return 1;
+    }
+    if (result.outcome === "failed") {
+      writeError(`${resultError(result)}\n`);
+      return 1;
+    }
+    return 0;
+  } catch (error) {
+    writeError(`${error instanceof ControlClientError ? error.message : "Toggl command failed"}\n`);
+    return 1;
+  }
+}
+
+async function main(): Promise<void> {
+  process.exitCode = await runControlCli(process.argv.slice(2));
+}
+
+function isMainModule(): boolean {
+  try {
+    return Boolean(
+      process.argv[1] &&
+        realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)),
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  await main();
+}

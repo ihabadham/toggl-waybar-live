@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
+    "toggl-waybar": "dist/control-cli.js",
     "toggl-waybar-daemon": "dist/daemon.js",
     "toggl-waybar-render": "dist/renderer.js"
   },

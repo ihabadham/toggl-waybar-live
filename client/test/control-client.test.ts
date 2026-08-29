@@ -1,0 +1,144 @@
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  type ControlClientError,
+  sendControlCommand,
+  type WatchController,
+  watchControlSnapshots,
+} from "../src/control-client.js";
+import type { ControlSnapshot } from "../src/control-protocol.js";
+import {
+  type ControlProvider,
+  type ControlServerController,
+  startControlServer,
+} from "../src/control-server.js";
+
+const directories: string[] = [];
+const controlServers: ControlServerController[] = [];
+const rawServers: Server[] = [];
+const rawSockets = new Set<Socket>();
+const watches: WatchController[] = [];
+
+function snapshot(): ControlSnapshot {
+  return {
+    version: 1,
+    type: "snapshot",
+    status: "idle",
+    connection: "connected",
+    confidence: "confirmed",
+    pending: null,
+    current: null,
+    completedTodaySeconds: 60,
+    currentContributesToToday: false,
+    presets: [],
+    generatedAt: "2026-08-27T11:00:00Z",
+    lastSynchronizedAt: "2026-08-27T11:00:00Z",
+    error: null,
+  };
+}
+
+function provider(): ControlProvider {
+  return {
+    handle: async () => ({
+      version: 1,
+      type: "result",
+      outcome: "already_idle",
+      error: null,
+    }),
+    snapshot,
+    subscribe: () => () => undefined,
+  };
+}
+
+async function socketPath(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "toggl-control-client-"));
+  directories.push(directory);
+  return join(directory, "runtime", "control.sock");
+}
+
+afterEach(async () => {
+  for (const watch of watches.splice(0)) {
+    watch.stop();
+  }
+  await Promise.all(controlServers.splice(0).map((server) => server.close()));
+  await Promise.all(
+    rawServers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          for (const socket of rawSockets) {
+            socket.destroy();
+          }
+          server.close(() => resolve());
+        }),
+    ),
+  );
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
+});
+
+describe("control client", () => {
+  it("sends a one-shot command and fails promptly when the daemon is absent", async () => {
+    const path = await socketPath();
+    const server = await startControlServer({ path, provider: provider() });
+    controlServers.push(server);
+
+    await expect(sendControlCommand({ version: 1, type: "stop" }, { path })).resolves.toMatchObject(
+      {
+        outcome: "already_idle",
+      },
+    );
+    await server.close();
+    controlServers.splice(controlServers.indexOf(server), 1);
+    await expect(
+      sendControlCommand({ version: 1, type: "stop" }, { path, timeoutMilliseconds: 100 }),
+    ).rejects.toMatchObject({ code: "daemon_unavailable" } satisfies Partial<ControlClientError>);
+  });
+
+  it("rejects malformed or multiple command response frames", async () => {
+    const path = await socketPath();
+    await mkdir(join(path, ".."), { recursive: true });
+    const server = createServer((socket) => {
+      rawSockets.add(socket);
+      socket.once("close", () => rawSockets.delete(socket));
+      socket.once("data", () => {
+        socket.write("{}\n{}\n");
+        setImmediate(() => socket.end());
+      });
+    });
+    rawServers.push(server);
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+
+    await expect(sendControlCommand({ version: 1, type: "toggle" }, { path })).rejects.toThrow(
+      "multiple responses",
+    );
+  });
+
+  it("emits one unavailable snapshot per disconnect and reconnects forever", async () => {
+    const path = await socketPath();
+    const received: ControlSnapshot[] = [];
+    const watch = watchControlSnapshots((value) => received.push(value), {
+      path,
+      reconnectDelay: () => 5,
+      now: () => new Date("2026-08-27T12:00:00Z"),
+    });
+    watches.push(watch);
+
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(received[0]?.error).toBe("daemon_unavailable");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(received).toHaveLength(1);
+
+    const server = await startControlServer({ path, provider: provider() });
+    controlServers.push(server);
+    await vi.waitFor(() => expect(received.some((value) => value.error === null)).toBe(true));
+
+    await server.close();
+    controlServers.splice(controlServers.indexOf(server), 1);
+    await vi.waitFor(() =>
+      expect(received.filter((value) => value.error === "daemon_unavailable")).toHaveLength(2),
+    );
+  });
+});

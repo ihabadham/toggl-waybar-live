@@ -98,6 +98,32 @@ describe("Waybar rendering", () => {
     expect(plainMarkup(offline.tooltip)).toContain("Relay offline");
   });
 
+  it("exposes stopping and resuming states without changing the compact running text", () => {
+    const base = renderWaybar(rendererState({ pending: null }), generatedAt, { labelMaxChars: 12 });
+    const stopping = renderWaybar(rendererState({ pending: "stopping" }), generatedAt, {
+      labelMaxChars: 12,
+    });
+    const resuming = renderWaybar(
+      rendererState({
+        status: "idle",
+        label: null,
+        description: null,
+        projectName: null,
+        entryStart: null,
+        runningContributesToToday: false,
+        pending: "resuming",
+      }),
+      generatedAt,
+      { labelMaxChars: 12 },
+    );
+
+    expect(stopping.text).toBe(base.text);
+    expect(stopping.class).toEqual(["running", "connected", "stopping"]);
+    expect(plainMarkup(stopping.tooltip)).toContain("Stopping…");
+    expect(resuming.class).toEqual(["idle", "connected", "resuming"]);
+    expect(plainMarkup(resuming.tooltip)).toContain("Resuming…");
+  });
+
   it("falls back from an empty description to project name and then Running", () => {
     expect(
       renderWaybar(
