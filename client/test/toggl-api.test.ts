@@ -12,6 +12,12 @@ const apiEntry = {
   user_id: 303,
   project_id: 404,
   project_name: "Internal",
+  task_id: 505,
+  task_name: "Write tests",
+  tag_ids: [607, 606],
+  tags: ["client", "urgent"],
+  billable: true,
+  at: "2026-08-27T10:00:00Z",
   description: "Review",
   start: "2026-08-27T10:00:00Z",
   stop: null,
@@ -58,6 +64,12 @@ describe("Toggl API", () => {
           start: "2026-08-27T10:00:00Z",
           stop: null,
           durationSeconds: null,
+          taskId: "505",
+          taskName: "Write tests",
+          tagIds: ["607", "606"],
+          tags: ["client", "urgent"],
+          billable: true,
+          updatedAt: "2026-08-27T10:00:00Z",
         },
       ],
       quota: { remaining: 28, resetsInSeconds: 1_750 },
@@ -96,6 +108,156 @@ describe("Toggl API", () => {
       data: null,
       quota: { remaining: null, resetsInSeconds: null },
     });
+  });
+
+  it("treats a missing current entry as confirmed idle", async () => {
+    const api = new TogglApi(
+      token,
+      async () =>
+        new Response("not found", {
+          status: 404,
+          headers: { "x-toggl-quota-remaining": "27", "x-toggl-quota-resets-in": "90" },
+        }),
+    );
+
+    await expect(api.fetchCurrent()).resolves.toEqual({
+      ok: true,
+      data: null,
+      quota: { remaining: 27, resetsInSeconds: 90 },
+    });
+  });
+
+  it("creates and stops entries with the exact workspace-scoped requests", async () => {
+    const requests: RequestInit[] = [];
+    const urls: string[] = [];
+    const api = new TogglApi(token, async (input, init) => {
+      urls.push(String(input));
+      requests.push(init ?? {});
+      return Response.json(apiEntry, {
+        headers: { "x-toggl-quota-remaining": "26", "x-toggl-quota-resets-in": "80" },
+      });
+    });
+
+    const activity = {
+      workspaceId: "202",
+      description: "Review",
+      projectId: "404",
+      taskId: "505",
+      tagIds: ["607", "606", "607"],
+      tags: ["urgent", "client", "urgent"],
+      billable: true,
+    };
+    await api.createRunningEntry(activity, "2026-08-27T12:30:00+02:00");
+    await api.stopTimeEntry("202", "101");
+
+    expect(urls).toEqual([
+      "https://api.track.toggl.com/api/v9/workspaces/202/time_entries",
+      "https://api.track.toggl.com/api/v9/workspaces/202/time_entries/101/stop",
+    ]);
+    expect(
+      requests.map((request) => ({
+        method: request.method,
+        headers: Object.fromEntries(new Headers(request.headers)),
+        body: request.body,
+      })),
+    ).toEqual([
+      {
+        method: "POST",
+        headers: expect.objectContaining({
+          authorization: `Basic ${Buffer.from(`${token}:api_token`).toString("base64")}`,
+          accept: "application/json",
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({
+          created_with: "toggl-waybar-live",
+          workspace_id: 202,
+          description: "Review",
+          project_id: 404,
+          task_id: 505,
+          tag_ids: [606, 607],
+          tags: ["client", "urgent"],
+          billable: true,
+          start: "2026-08-27T10:30:00.000Z",
+          duration: -1,
+          stop: null,
+        }),
+      },
+      {
+        method: "PATCH",
+        headers: expect.objectContaining({
+          authorization: `Basic ${Buffer.from(`${token}:api_token`).toString("base64")}`,
+          accept: "application/json",
+        }),
+        body: undefined,
+      },
+    ]);
+    expect(new Headers(requests[1]?.headers).has("content-type")).toBe(false);
+  });
+
+  it("marks only ambiguous mutation failures as potentially successful", async () => {
+    const responses = [
+      new Response("upstream", { status: 503 }),
+      Response.json({ unexpected: true }),
+      new Response("invalid", { status: 400 }),
+      new Response("already stopped", { status: 409 }),
+      new Response("missing", { status: 404 }),
+    ];
+    const api = new TogglApi(token, async () => responses.shift() as Response);
+    const activity = {
+      workspaceId: "202",
+      description: "Review",
+      projectId: null,
+      taskId: null,
+      tagIds: [],
+      tags: [],
+      billable: false,
+    };
+    const network = new TogglApi(token, async () => {
+      throw new Error("offline");
+    });
+
+    const results = [
+      await network.createRunningEntry(activity, "2026-08-27T10:00:00Z"),
+      await api.createRunningEntry(activity, "2026-08-27T10:00:00Z"),
+      await api.createRunningEntry(activity, "2026-08-27T10:00:00Z"),
+      await api.createRunningEntry(activity, "2026-08-27T10:00:00Z"),
+      await api.stopTimeEntry("202", "101"),
+      await api.stopTimeEntry("202", "101"),
+    ];
+
+    expect(
+      results.map((result) => (result.ok ? null : [result.status, result.mayHaveSucceeded])),
+    ).toEqual([
+      [null, true],
+      [503, true],
+      [200, true],
+      [400, false],
+      [409, false],
+      [404, false],
+    ]);
+  });
+
+  it("rejects unsafe mutation IDs before making a request", async () => {
+    let calls = 0;
+    const api = new TogglApi(token, async () => {
+      calls += 1;
+      return Response.json(apiEntry);
+    });
+    const activity = {
+      workspaceId: "9007199254740992",
+      description: "Review",
+      projectId: null,
+      taskId: null,
+      tagIds: [],
+      tags: [],
+      billable: false,
+    };
+
+    await expect(api.createRunningEntry(activity, "2026-08-27T10:00:00Z")).rejects.toThrow(
+      "safe integer",
+    );
+    await expect(api.stopTimeEntry("202", "9007199254740992")).rejects.toThrow("safe integer");
+    expect(calls).toBe(0);
   });
 
   it("classifies quota, authentication, and transient failures without exposing secrets", async () => {

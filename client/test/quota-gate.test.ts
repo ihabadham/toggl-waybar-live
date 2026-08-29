@@ -56,6 +56,7 @@ describe("quota gate", () => {
       {
         ok: false,
         error: "quota_exhausted",
+        mayHaveSucceeded: false,
         permanent: false,
         quota: { remaining: null, resetsInSeconds: 60 },
         status: 402,
