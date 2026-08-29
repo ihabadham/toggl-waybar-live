@@ -225,8 +225,13 @@ export async function startControlServer(
   await ensurePrivateDirectory(directory);
   await prepareSocketPath(options.path);
 
+  let accepting = true;
   const sockets = new Map<Socket, () => void>();
   const server = createServer((socket) => {
+    if (!accepting) {
+      socket.destroy();
+      return;
+    }
     const reject = serveConnection(socket, options.provider);
     sockets.set(socket, reject);
     socket.once("close", () => sockets.delete(socket));
@@ -267,15 +272,17 @@ export async function startControlServer(
     if (closing !== null) {
       return closing;
     }
+    accepting = false;
+    const stopped = closeServer(server);
+    for (const reject of sockets.values()) {
+      reject();
+    }
     closing = (async () => {
       const current = await inspect(options.path);
       if (current?.isSocket() && sameIdentity(created, current)) {
         await unlink(options.path);
       }
-      for (const reject of sockets.values()) {
-        reject();
-      }
-      await closeServer(server);
+      await stopped;
     })();
     return closing;
   };

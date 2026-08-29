@@ -116,6 +116,30 @@ describe("control client", () => {
     );
   });
 
+  it("waits for a delayed mutation result after the socket connects", async () => {
+    const path = await socketPath();
+    await mkdir(join(path, ".."), { recursive: true });
+    const server = createServer((socket) => {
+      rawSockets.add(socket);
+      socket.once("close", () => rawSockets.delete(socket));
+      socket.once("data", () => {
+        setTimeout(
+          () =>
+            socket.end(
+              `${JSON.stringify({ version: 1, type: "result", outcome: "stopped", error: null })}\n`,
+            ),
+          2_100,
+        );
+      });
+    });
+    rawServers.push(server);
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+
+    await expect(sendControlCommand({ version: 1, type: "stop" }, { path })).resolves.toMatchObject(
+      { outcome: "stopped" },
+    );
+  }, 4_000);
+
   it("emits one unavailable snapshot per disconnect and reconnects forever", async () => {
     const path = await socketPath();
     const received: ControlSnapshot[] = [];
@@ -140,5 +164,52 @@ describe("control client", () => {
     await vi.waitFor(() =>
       expect(received.filter((value) => value.error === "daemon_unavailable")).toHaveLength(2),
     );
+  });
+
+  it("disconnects before accumulating an oversized watch response", async () => {
+    const path = await socketPath();
+    await mkdir(join(path, ".."), { recursive: true });
+    const server = createServer((socket) => {
+      rawSockets.add(socket);
+      socket.once("close", () => rawSockets.delete(socket));
+      socket.once("data", () => socket.write(Buffer.alloc(64 * 1_024 + 1, 0x78)));
+    });
+    rawServers.push(server);
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    const received: ControlSnapshot[] = [];
+    const watch = watchControlSnapshots((value) => received.push(value), {
+      path,
+      reconnectDelay: () => 60_000,
+    });
+    watches.push(watch);
+
+    await vi.waitFor(() => expect(received[0]?.error).toBe("daemon_unavailable"));
+    watch.stop();
+    await expect(watch.done).resolves.toBeUndefined();
+  });
+
+  it("cancels a pending reconnect and resolves done when watch stops", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const path = await socketPath();
+      const received: ControlSnapshot[] = [];
+      const watch = watchControlSnapshots((value) => received.push(value), {
+        path,
+        reconnectDelay: () => 60_000,
+      });
+      watches.push(watch);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(received[0]?.error).toBe("daemon_unavailable");
+      expect(vi.getTimerCount()).toBe(1);
+      watch.stop();
+
+      await expect(watch.done).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(received).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,7 +1,22 @@
-import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const spawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 
 import { type ControlCliDependencies, runControlCli } from "../src/control-cli.js";
 import type { ControlSnapshot } from "../src/control-protocol.js";
+
+beforeEach(() => {
+  spawnMock.mockReset();
+  spawnMock.mockImplementation(() => {
+    const child = new EventEmitter() as EventEmitter & { unref(): void };
+    child.unref = vi.fn();
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  });
+});
 
 function result(
   outcome: "stopped" | "drawer_required" | "failed" = "stopped",
@@ -101,6 +116,19 @@ describe("control CLI", () => {
     expect(invokeDrawer).not.toHaveBeenCalled();
   });
 
+  it("spawns only the production drawer executable with fixed argv and no shell", async () => {
+    const { dependencies, stderr } = outputDependencies({
+      send: async () => result("drawer_required"),
+    });
+
+    expect(await runControlCli(["toggle"], dependencies)).toBe(0);
+    expect(spawnMock).toHaveBeenCalledWith("toggl-waybar-drawer", ["open"], {
+      shell: false,
+      stdio: "ignore",
+    });
+    expect(stderr).toEqual([]);
+  });
+
   it("reports command failures only on stderr", async () => {
     const { dependencies, stderr, stdout } = outputDependencies({
       send: async () => result("failed", "request_failed"),
@@ -133,6 +161,54 @@ describe("control CLI", () => {
     finish?.();
     await expect(running).resolves.toBe(0);
     expect(stderr).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it("coalesces watch snapshots and ticks while stdout is backpressured", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-27T11:00:00Z"));
+    let finish: (() => void) | undefined;
+    let emit: ((value: ControlSnapshot) => void) | undefined;
+    let drain: (() => void) | undefined;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const writes: string[] = [];
+    const output = {
+      write: vi.fn((value: string) => {
+        writes.push(value);
+        return writes.length > 1;
+      }),
+      once: vi.fn((_event: "drain", listener: () => void) => {
+        drain = listener;
+      }),
+    };
+    const { dependencies } = outputDependencies({
+      output,
+      watch: (listener) => {
+        emit = listener;
+        listener(snapshot());
+        return { done, stop: () => finish?.() };
+      },
+    });
+
+    const running = runControlCli(["watch"], dependencies);
+    expect(writes).toHaveLength(1);
+    for (let index = 0; index < 100; index += 1) {
+      emit?.(snapshot({ completedTodaySeconds: index }));
+    }
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(writes).toHaveLength(1);
+    expect(output.once).toHaveBeenCalledOnce();
+
+    drain?.();
+    expect(writes).toHaveLength(2);
+    expect(JSON.parse(writes[1] ?? "")).toMatchObject({
+      current: { elapsed: "01:00:10" },
+      today: "01:01:49",
+    });
+    finish?.();
+    await expect(running).resolves.toBe(0);
     vi.useRealTimers();
   });
 });

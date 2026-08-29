@@ -235,4 +235,21 @@ describe("control server", () => {
 
     await new Promise<void>((resolve) => replacement.close(() => resolve()));
   });
+
+  it("does not dispatch a command after shutdown begins", async () => {
+    const path = await socketPath();
+    const source = provider();
+    const server = await startControlServer({ path, provider: source });
+    servers.push(server);
+    const socket = createConnection(path);
+    socket.on("error", () => undefined);
+    const socketClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    socket.once("connect", () => socket.write('{"version":1,"type":"stop"}\n'));
+
+    const closing = server.close();
+    await Promise.all([closing, socketClosed]);
+    servers.splice(servers.indexOf(server), 1);
+
+    expect(source.handled).not.toHaveBeenCalled();
+  });
 });

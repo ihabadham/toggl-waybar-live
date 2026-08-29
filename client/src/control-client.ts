@@ -12,7 +12,7 @@ import {
 import { runtimePaths } from "./runtime-path.js";
 
 const maximumFrameBytes = 64 * 1_024;
-const commandTimeoutMilliseconds = 2_000;
+const connectionTimeoutMilliseconds = 2_000;
 const maximumReconnectDelayMilliseconds = 5_000;
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
@@ -65,7 +65,7 @@ export function sendControlCommand(
   options: CommandClientOptions = {},
 ): Promise<CommandResult> {
   const path = options.path ?? runtimePaths().controlSocket;
-  const timeoutMilliseconds = options.timeoutMilliseconds ?? commandTimeoutMilliseconds;
+  const timeoutMilliseconds = options.timeoutMilliseconds ?? connectionTimeoutMilliseconds;
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     let buffer = Buffer.alloc(0);
@@ -84,10 +84,13 @@ export function sendControlCommand(
       }
     };
     const timeout = setTimeout(
-      () => finish(new ControlClientError("The Toggl daemon did not respond")),
+      () => finish(new ControlClientError("The Toggl daemon is unavailable", "daemon_unavailable")),
       timeoutMilliseconds,
     );
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`, "utf8"));
+    socket.once("connect", () => {
+      clearTimeout(timeout);
+      socket.write(`${JSON.stringify(request)}\n`, "utf8");
+    });
     socket.on("data", (chunk: Buffer) => {
       if (buffer.length + chunk.length > maximumFrameBytes) {
         finish(new ControlClientError("The Toggl daemon sent an oversized response"));
@@ -185,21 +188,24 @@ export function watchControlSnapshots(
       candidate.write(`${JSON.stringify({ version: 1, type: "watch" })}\n`, "utf8"),
     );
     candidate.on("data", (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (true) {
-        const newline = buffer.indexOf(0x0a);
-        if (newline === -1) {
-          if (buffer.length > maximumFrameBytes) {
-            disconnect();
-          }
-          return;
-        }
-        if (newline + 1 > maximumFrameBytes) {
+      let offset = 0;
+      while (offset < chunk.length) {
+        const newline = chunk.indexOf(0x0a, offset);
+        const end = newline === -1 ? chunk.length : newline;
+        const terminatorBytes = newline === -1 ? 0 : 1;
+        const segmentLength = end - offset;
+        if (buffer.length + segmentLength + terminatorBytes > maximumFrameBytes) {
           disconnect();
           return;
         }
-        const frame = buffer.subarray(0, newline);
-        buffer = buffer.subarray(newline + 1);
+        if (segmentLength > 0) {
+          buffer = Buffer.concat([buffer, chunk.subarray(offset, end)]);
+        }
+        if (newline === -1) {
+          return;
+        }
+        const frame = buffer;
+        buffer = Buffer.alloc(0);
         try {
           const text = new TextDecoder("utf-8", { fatal: true }).decode(frame);
           const snapshot = controlSnapshotSchema.parse(JSON.parse(text));
@@ -210,6 +216,7 @@ export function watchControlSnapshots(
           disconnect();
           return;
         }
+        offset = newline + 1;
       }
     });
     candidate.once("error", disconnect);

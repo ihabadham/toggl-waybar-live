@@ -19,12 +19,67 @@ import { drawerView } from "./drawer-view.js";
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
 
+export interface ControlCliOutput {
+  once(event: "drain", listener: () => void): unknown;
+  write(value: string): boolean;
+}
+
 export interface ControlCliDependencies {
   invokeDrawer?: () => Promise<boolean>;
+  output?: ControlCliOutput;
   send?: (request: CommandRequest) => Promise<CommandResult>;
   watch?: (onSnapshot: Parameters<typeof watchControlSnapshots>[0]) => WatchController;
   writeError?: (value: string) => void;
   writeOutput?: (value: string) => void;
+}
+
+function outputFor(dependencies: ControlCliDependencies): ControlCliOutput {
+  if (dependencies.output) {
+    return dependencies.output;
+  }
+  if (dependencies.writeOutput) {
+    return {
+      once: (_event, listener) => queueMicrotask(listener),
+      write: (value) => {
+        dependencies.writeOutput?.(value);
+        return true;
+      },
+    };
+  }
+  return process.stdout;
+}
+
+function coalescingWriter(output: ControlCliOutput): {
+  close(): void;
+  write(value: string): void;
+} {
+  let blocked = false;
+  let closed = false;
+  let pending: string | null = null;
+  const flush = (): void => {
+    if (blocked || closed || pending === null) {
+      return;
+    }
+    const value = pending;
+    pending = null;
+    if (!output.write(value)) {
+      blocked = true;
+      output.once("drain", () => {
+        blocked = false;
+        flush();
+      });
+    }
+  };
+  return {
+    close: () => {
+      closed = true;
+      pending = null;
+    },
+    write: (value) => {
+      pending = value;
+      flush();
+    },
+  };
 }
 
 function usage(): string {
@@ -77,7 +132,6 @@ export async function runControlCli(
   dependencies: ControlCliDependencies = {},
 ): Promise<number> {
   const writeError = dependencies.writeError ?? ((value) => process.stderr.write(value));
-  const writeOutput = dependencies.writeOutput ?? ((value) => process.stdout.write(value));
   const request = parseArguments(arguments_);
   if (request === null) {
     writeError(`${usage()}\n`);
@@ -85,20 +139,24 @@ export async function runControlCli(
   }
 
   if (request.type === "watch") {
+    const writer = coalescingWriter(outputFor(dependencies));
     let latestConnected = false;
     let latestSnapshot: Parameters<typeof drawerView>[0] | null = null;
     const emit = (snapshot: Parameters<typeof drawerView>[0]): void => {
       latestSnapshot = snapshot;
       latestConnected = snapshot.error !== "daemon_unavailable";
-      writeOutput(`${JSON.stringify(drawerView(snapshot))}\n`);
+      writer.write(`${JSON.stringify(drawerView(snapshot))}\n`);
     };
     const controller = (dependencies.watch ?? watchControlSnapshots)(emit);
     const ticker = setInterval(() => {
       if (latestConnected && latestSnapshot !== null) {
-        writeOutput(`${JSON.stringify(drawerView(latestSnapshot))}\n`);
+        writer.write(`${JSON.stringify(drawerView(latestSnapshot))}\n`);
       }
     }, 1_000);
-    await controller.done.finally(() => clearInterval(ticker));
+    await controller.done.finally(() => {
+      clearInterval(ticker);
+      writer.close();
+    });
     return 0;
   }
 
