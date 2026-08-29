@@ -42,6 +42,9 @@ export async function loadPresets(path: string): Promise<ResumePreset[]> {
 
 export async function savePresets(path: string, presets: readonly ResumePreset[]): Promise<void> {
   const file = presetFileSchema.parse({ version: 1, presets });
+  if (Buffer.byteLength(JSON.stringify(file), "utf8") > maximumPresetFileBytes) {
+    throw new Error("Preset file must not exceed 64 KiB");
+  }
   await writePrivateJson(path, file, {
     directoryDescription: "Preset directory",
     targetDescription: "Preset target",

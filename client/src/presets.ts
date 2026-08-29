@@ -99,8 +99,11 @@ export function upsertPreset(
 ): ResumePreset[] {
   const canonical = canonicalActivity(activity);
   const identity = presetIdentity(canonical);
+  const matching = [...presets]
+    .map(canonicalPreset)
+    .filter((preset) => presetIdentity(preset) === identity)
+    .sort(compareNewest)[0];
   const existing = mergePresets([...presets]);
-  const matching = existing.find((preset) => presetIdentity(preset) === identity);
   const replacement: ResumePreset = {
     ...canonical,
     id: matching?.id ?? createId(),

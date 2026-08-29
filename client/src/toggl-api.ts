@@ -92,6 +92,13 @@ function externalIdArray(value: unknown, name: string): string[] {
   return value.map((item) => externalIdSchema.parse(item));
 }
 
+function boolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`invalid ${name}`);
+  }
+  return value;
+}
+
 function normalizeEntry(value: unknown): RichTogglEntry {
   if (!isRecord(value)) {
     throw new Error("invalid entry");
@@ -124,7 +131,7 @@ function normalizeEntry(value: unknown): RichTogglEntry {
     taskName: typeof value.task_name === "string" ? value.task_name : null,
     tagIds: externalIdArray(value.tag_ids, "tag_ids"),
     tags: stringArray(value.tags, "tags"),
-    billable: value.billable === true,
+    billable: boolean(value.billable, "billable"),
     updatedAt: value.at === undefined || value.at === null ? null : rfc3339Schema.parse(value.at),
   };
 }

@@ -109,4 +109,27 @@ describe("resume presets", () => {
         .sort((left, right) => Date.parse(right) - Date.parse(left)),
     );
   });
+
+  it("preserves the UUID of a matching preset even when it falls below the MRU cap", () => {
+    const matching = preset({
+      id: "0182cc10-54d1-7c35-b4f3-e93bb4c0b111",
+      lastUsedAt: "2026-08-27T10:00:00Z",
+    });
+    const newer = Array.from({ length: maximumPresets }, (_, index) =>
+      preset({
+        id: `0182cc10-54d1-7c35-b4f3-e93bb4c0b2${String(index).padStart(2, "0")}`,
+        description: `Newer ${index}`,
+        lastUsedAt: `2026-08-27T${String(11 + index).padStart(2, "0")}:00:00Z`,
+      }),
+    );
+
+    const upserted = upsertPreset(
+      [matching, ...newer],
+      { ...matching, projectName: "Renamed project" },
+      "2026-08-28T00:00:00Z",
+      () => "0182cc10-54d1-7c35-b4f3-e93bb4c0b999",
+    );
+
+    expect(upserted[0]).toMatchObject({ id: matching.id, projectName: "Renamed project" });
+  });
 });

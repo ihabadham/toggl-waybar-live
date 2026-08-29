@@ -70,6 +70,16 @@ describe("preset file", () => {
     expect(await loadPresets(path)).toEqual([]);
   });
 
+  it("rejects an oversized save without replacing the persisted presets", async () => {
+    const path = await temporaryPresetPath();
+    await savePresets(path, [preset()]);
+
+    await expect(savePresets(path, [preset({ description: "x".repeat(70_000) })])).rejects.toThrow(
+      "64 KiB",
+    );
+    expect(await loadPresets(path)).toEqual([preset()]);
+  });
+
   it("refuses preset symlinks for both reading and writing", async () => {
     const path = await temporaryPresetPath();
     const directory = join(path, "..");

@@ -237,6 +237,34 @@ describe("Toggl API", () => {
     ]);
   });
 
+  it("treats missing or malformed billable mutation responses as ambiguous failures", async () => {
+    const { billable: _billable, ...withoutBillable } = apiEntry;
+    const responses = [
+      Response.json(withoutBillable),
+      Response.json({ ...apiEntry, billable: "yes" }),
+    ];
+    const api = new TogglApi(token, async () => responses.shift() as Response);
+    const activity = {
+      workspaceId: "202",
+      description: "Review",
+      projectId: null,
+      taskId: null,
+      tagIds: [],
+      tags: [],
+      billable: false,
+    };
+
+    const results = [
+      await api.createRunningEntry(activity, "2026-08-27T10:00:00Z"),
+      await api.createRunningEntry(activity, "2026-08-27T10:00:00Z"),
+    ];
+
+    expect(results).toMatchObject([
+      { ok: false, status: 200, mayHaveSucceeded: true },
+      { ok: false, status: 200, mayHaveSucceeded: true },
+    ]);
+  });
+
   it("rejects unsafe mutation IDs before making a request", async () => {
     let calls = 0;
     const api = new TogglApi(token, async () => {
