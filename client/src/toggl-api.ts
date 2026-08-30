@@ -37,6 +37,8 @@ type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Re
 type RequestMethod = "GET" | "POST" | "PATCH";
 type UnknownRecord = Record<string, unknown>;
 
+const requestDeadlineMilliseconds = 10_000;
+
 interface RequestOptions<T> {
   body?: unknown;
   currentNotFound?: T;
@@ -162,6 +164,7 @@ export class TogglApi {
     apiToken: string,
     private readonly fetcher: Fetcher = fetch,
     private readonly baseUrl = "https://api.track.toggl.com",
+    private readonly deadlineMilliseconds = requestDeadlineMilliseconds,
   ) {
     this.authorization = `Basic ${Buffer.from(`${apiToken}:api_token`, "utf8").toString("base64")}`;
   }
@@ -237,63 +240,80 @@ export class TogglApi {
 
   private async request<T>(url: URL, options: RequestOptions<T>): Promise<ApiResult<T>> {
     const mutation = options.method !== "GET";
-    let response: Response;
+    const abort = new AbortController();
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      deadlineTimer = setTimeout(() => {
+        abort.abort();
+        reject(new Error("Toggl request deadline exceeded"));
+      }, this.deadlineMilliseconds);
+    });
+    const beforeDeadline = <Value>(promise: Promise<Value>): Promise<Value> =>
+      Promise.race([promise, deadline]);
     try {
-      const headers: Record<string, string> = {
-        authorization: this.authorization,
-        accept: "application/json",
-      };
-      if (options.body !== undefined) {
-        headers["content-type"] = "application/json";
+      let response: Response;
+      try {
+        const headers: Record<string, string> = {
+          authorization: this.authorization,
+          accept: "application/json",
+        };
+        if (options.body !== undefined) {
+          headers["content-type"] = "application/json";
+        }
+        response = await beforeDeadline(
+          this.fetcher(url, {
+            method: options.method,
+            headers,
+            signal: abort.signal,
+            ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+          }),
+        );
+      } catch {
+        return {
+          ok: false,
+          error: "request_failed",
+          mayHaveSucceeded: mutation,
+          permanent: false,
+          quota: { remaining: null, resetsInSeconds: null },
+          status: null,
+        };
       }
-      response = await this.fetcher(url, {
-        method: options.method,
-        headers,
-        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-      });
-    } catch {
-      return {
-        ok: false,
-        error: "request_failed",
-        mayHaveSucceeded: mutation,
-        permanent: false,
-        quota: { remaining: null, resetsInSeconds: null },
-        status: null,
-      };
-    }
 
-    const quota = quotaFrom(response);
-    if (response.status === 404 && options.currentNotFound !== undefined) {
-      return { ok: true, data: options.currentNotFound, quota };
-    }
-    if (!response.ok) {
-      const authenticationFailure = response.status === 401 || response.status === 403;
-      return {
-        ok: false,
-        error:
-          response.status === 402
-            ? "quota_exhausted"
-            : authenticationFailure
-              ? "authentication_failed"
-              : "request_failed",
-        mayHaveSucceeded: mutation && response.status >= 500,
-        permanent: authenticationFailure,
-        quota,
-        status: response.status,
-      };
-    }
+      const quota = quotaFrom(response);
+      if (response.status === 404 && options.currentNotFound !== undefined) {
+        return { ok: true, data: options.currentNotFound, quota };
+      }
+      if (!response.ok) {
+        const authenticationFailure = response.status === 401 || response.status === 403;
+        return {
+          ok: false,
+          error:
+            response.status === 402
+              ? "quota_exhausted"
+              : authenticationFailure
+                ? "authentication_failed"
+                : "request_failed",
+          mayHaveSucceeded: mutation && response.status >= 500,
+          permanent: authenticationFailure,
+          quota,
+          status: response.status,
+        };
+      }
 
-    try {
-      return { ok: true, data: options.parse(await response.json()), quota };
-    } catch {
-      return {
-        ok: false,
-        error: "request_failed",
-        mayHaveSucceeded: mutation,
-        permanent: false,
-        quota,
-        status: response.status,
-      };
+      try {
+        return { ok: true, data: options.parse(await beforeDeadline(response.json())), quota };
+      } catch {
+        return {
+          ok: false,
+          error: "request_failed",
+          mayHaveSucceeded: mutation,
+          permanent: false,
+          quota,
+          status: response.status,
+        };
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
     }
   }
 }

@@ -19,6 +19,10 @@ import { drawerView } from "./drawer-view.js";
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
 
+const installedDrawerExecutable = "__TOGGL_WAYBAR_DRAWER_EXECUTABLE__";
+const drawerExecutionTimeoutMilliseconds = 30_000;
+const maximumDrawerErrorCharacters = 4_096;
+
 export interface ControlCliOutput {
   once(event: "drain", listener: () => void): unknown;
   write(value: string): boolean;
@@ -103,23 +107,60 @@ function parseArguments(arguments_: readonly string[]): ControlRequest | null {
   return parsed.success ? parsed.data : null;
 }
 
+function drawerExecutable(): string {
+  return installedDrawerExecutable.startsWith("__TOGGL_WAYBAR_")
+    ? "toggl-waybar-drawer"
+    : installedDrawerExecutable;
+}
+
 function defaultInvokeDrawer(): Promise<boolean> {
   return new Promise((resolve, reject) => {
-    const child = spawn("toggl-waybar-drawer", ["open"], {
+    const child = spawn(drawerExecutable(), ["open"], {
       shell: false,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
     });
-    child.once("spawn", () => {
-      child.unref();
-      resolve(true);
+    let errorOutput = "";
+    let settled = false;
+    const finish = (result: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      result();
+    };
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (errorOutput.length < maximumDrawerErrorCharacters) {
+        errorOutput += chunk.slice(0, maximumDrawerErrorCharacters - errorOutput.length);
+      }
     });
     child.once("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") {
-        resolve(false);
+        finish(() => resolve(false));
       } else {
-        reject(error);
+        finish(() => reject(new ControlClientError(error.message)));
       }
     });
+    child.once("close", (exitCode) => {
+      finish(() => {
+        if (exitCode === 0) {
+          resolve(true);
+          return;
+        }
+        const detail = errorOutput.trim();
+        reject(
+          new ControlClientError(
+            detail.length > 0 ? detail : `Toggl drawer exited with status ${exitCode ?? "unknown"}`,
+          ),
+        );
+      });
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new ControlClientError("Toggl drawer command timed out")));
+    }, drawerExecutionTimeoutMilliseconds);
+    timeout.unref();
   });
 }
 

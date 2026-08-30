@@ -19,6 +19,11 @@ export interface ResumePreset extends ResumeActivity {
   taskName: string | null;
 }
 
+export interface PresetUpdate {
+  activity: ResumeActivity & Pick<ResumePreset, "projectName" | "taskName">;
+  lastUsedAt: string;
+}
+
 export type Activity = ResumeActivity;
 export type Preset = ResumePreset;
 
@@ -101,22 +106,44 @@ export function upsertPreset(
   lastUsedAt: string,
   createId: () => string = randomUUID,
 ): ResumePreset[] {
-  const canonical = canonicalActivity(activity);
-  const identity = presetIdentity(canonical);
-  const matching = [...presets]
-    .map(canonicalPreset)
-    .filter((preset) => presetIdentity(preset) === identity)
-    .sort(compareNewest)[0];
-  const existing = mergePresets([...presets]);
-  const replacement: ResumePreset = {
-    ...canonical,
-    id: matching?.id ?? createId(),
-    lastUsedAt,
-    projectName: activity.projectName,
-    taskName: activity.taskName,
-  };
+  return upsertPresets(presets, [{ activity, lastUsedAt }], createId);
+}
+
+export function upsertPresets(
+  presets: readonly ResumePreset[],
+  updates: readonly PresetUpdate[],
+  createId: () => string = randomUUID,
+): ResumePreset[] {
+  const existingByIdentity = new Map<string, ResumePreset>();
+  for (const preset of presets.map(canonicalPreset)) {
+    const identity = presetIdentity(preset);
+    const existing = existingByIdentity.get(identity);
+    if (!existing || compareNewest(preset, existing) < 0) {
+      existingByIdentity.set(identity, preset);
+    }
+  }
+
+  const replacements = new Map<string, ResumePreset>();
+  for (const update of updates) {
+    const canonical = canonicalActivity(update.activity);
+    const identity = presetIdentity(canonical);
+    const previous = replacements.get(identity);
+    const replacement: ResumePreset = {
+      ...canonical,
+      id: existingByIdentity.get(identity)?.id ?? previous?.id ?? createId(),
+      lastUsedAt: update.lastUsedAt,
+      projectName: update.activity.projectName,
+      taskName: update.activity.taskName,
+    };
+    if (!previous || compareNewest(replacement, previous) < 0) {
+      replacements.set(identity, replacement);
+    }
+  }
+
   return mergePresets(
-    [replacement],
-    existing.filter((preset) => presetIdentity(preset) !== identity),
+    [...replacements.values()],
+    [...existingByIdentity.entries()]
+      .filter(([identity]) => !replacements.has(identity))
+      .map(([, preset]) => preset),
   );
 }

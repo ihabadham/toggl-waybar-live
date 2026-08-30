@@ -12,7 +12,7 @@ import {
   mergePresets,
   type ResumeActivity,
   type ResumePreset,
-  upsertPreset,
+  upsertPresets,
 } from "./presets.js";
 import type { QuotaGate } from "./quota-gate.js";
 import {
@@ -117,6 +117,7 @@ export class ClientCoordinator {
   private mutationTail: Promise<void> = Promise.resolve();
   private persistenceTail: Promise<void> = Promise.resolve();
   private presets: ResumePreset[];
+  private relaySnapshotNotBefore = Number.NEGATIVE_INFINITY;
   private state: ClientState;
   private readonly subscribers = new Set<Subscriber>();
   private timerRevision = 0;
@@ -224,6 +225,12 @@ export class ClientCoordinator {
   }
 
   applyRelay(message: RelayMessage): void {
+    if (
+      message.type === "snapshot" &&
+      Date.parse(message.snapshot.eventCreatedAt) < this.relaySnapshotNotBefore
+    ) {
+      return;
+    }
     const next = applyRelayMessage(this.state, message, this.window(this.now()));
     const confidence = this.ambiguousCreateUnresolved ? this.confidence : "confirmed";
     this.commit(next, { confidence });
@@ -248,7 +255,7 @@ export class ClientCoordinator {
         this.commit(this.state, { error: apiError(current) });
         return false;
       }
-      this.commitRestCurrent(current.data, window);
+      this.commitRestCurrent(current.data, window, now.toISOString());
       return true;
     }
 
@@ -280,6 +287,7 @@ export class ClientCoordinator {
     if (next.connection === "offline") {
       next = setConnection(next, "stale");
     }
+    this.markAuthoritativeTransition(now.toISOString());
     this.ambiguousCreateUnresolved = false;
     this.commit(next, { confidence: "confirmed", error: null });
     await this.refreshPresets([...today.data, ...(current.data === null ? [] : [current.data])]);
@@ -317,6 +325,10 @@ export class ClientCoordinator {
 
   private recordQuota(result: ApiResult<unknown>): void {
     this.options.quotaGate.record(result, this.now().getTime());
+  }
+
+  private markAuthoritativeTransition(transitionAt: string): void {
+    this.relaySnapshotNotBefore = Math.max(this.relaySnapshotNotBefore, Date.parse(transitionAt));
   }
 
   private commit(
@@ -376,6 +388,7 @@ export class ClientCoordinator {
       return true;
     }
     const revision = this.timerRevision;
+    const requestedAt = this.timestamp();
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
     if (revision !== this.timerRevision) {
@@ -392,15 +405,20 @@ export class ClientCoordinator {
       });
       return false;
     }
-    this.commitRestCurrent(current.data, this.window(this.now()));
+    this.commitRestCurrent(current.data, this.window(this.now()), requestedAt);
     return true;
   }
 
-  private commitRestCurrent(current: RichTogglEntry | null, window: DayWindow): void {
+  private commitRestCurrent(
+    current: RichTogglEntry | null,
+    window: DayWindow,
+    transitionAt: string,
+  ): void {
     let next = applyConfirmedCurrent(this.state, current, window, this.timestamp());
     if (next.connection === "offline") {
       next = setConnection(next, "stale");
     }
+    this.markAuthoritativeTransition(transitionAt);
     this.ambiguousCreateUnresolved = false;
     this.commit(next, { confidence: "confirmed", error: null });
   }
@@ -433,6 +451,7 @@ export class ClientCoordinator {
     }
 
     if (stopped.status === 404) {
+      const reconciliationRequestedAt = this.timestamp();
       const revision = this.timerRevision;
       const current = await this.api.fetchCurrent();
       this.recordQuota(current);
@@ -441,11 +460,11 @@ export class ClientCoordinator {
       }
       if (current.ok) {
         if (current.data?.id === target.id) {
-          this.commitRestCurrent(current.data, window);
+          this.commitRestCurrent(current.data, window, reconciliationRequestedAt);
           this.commit(setPending(this.state, null), { error: "request_failed" });
           return commandResult("failed", "request_failed");
         }
-        this.commitRestCurrent(current.data, window);
+        this.commitRestCurrent(current.data, window, reconciliationRequestedAt);
         const next = setPending(applyConfirmedStoppedId(this.state, target.id), null);
         this.commit(next, { error: null });
         return commandResult("stopped");
@@ -507,6 +526,7 @@ export class ClientCoordinator {
       const currentId = this.currentId();
       const conflictingCurrent = currentId !== null && currentId !== created.data.id;
       const next = setPending(applyRichCreateResult(this.state, created.data, window), null);
+      this.markAuthoritativeTransition(start);
       this.commit(next, { confidence: "confirmed", error: null });
       await this.refreshPresets([created.data]);
       if (conflictingCurrent) {
@@ -522,6 +542,7 @@ export class ClientCoordinator {
     }
 
     const revision = this.timerRevision;
+    const reconciliationRequestedAt = this.timestamp();
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
     if (revision !== this.timerRevision) {
@@ -546,7 +567,7 @@ export class ClientCoordinator {
     }
 
     const matching = current.data !== null && matchesActivity(current.data, activity, start);
-    this.commitRestCurrent(current.data, window);
+    this.commitRestCurrent(current.data, window, reconciliationRequestedAt);
     this.commit(setPending(this.state, null), { error: matching ? null : "request_failed" });
     if (matching && current.data !== null) {
       await this.refreshPresets([current.data]);
@@ -557,23 +578,24 @@ export class ClientCoordinator {
 
   private async reconcileCurrentWithinMutation(): Promise<void> {
     const revision = this.timerRevision;
+    const requestedAt = this.timestamp();
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
     if (revision !== this.timerRevision) {
       return;
     }
     if (current.ok) {
-      this.commitRestCurrent(current.data, this.window(this.now()));
+      this.commitRestCurrent(current.data, this.window(this.now()), requestedAt);
     } else {
       this.commit(this.state, { confidence: "uncertain", error: apiError(current) });
     }
   }
 
   private async refreshPresets(entries: readonly RichTogglEntry[]): Promise<void> {
-    let next = this.presets;
-    for (const entry of entries) {
-      next = upsertPreset(next, entry, entry.start);
-    }
+    const next = upsertPresets(
+      this.presets,
+      entries.map((entry) => ({ activity: entry, lastUsedAt: entry.start })),
+    );
     if (JSON.stringify(next) === JSON.stringify(this.presets)) {
       return;
     }

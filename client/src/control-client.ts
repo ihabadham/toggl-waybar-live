@@ -12,7 +12,7 @@ import {
 import { runtimePaths } from "./runtime-path.js";
 
 const maximumFrameBytes = 64 * 1_024;
-const connectionTimeoutMilliseconds = 2_000;
+const commandResponseTimeoutMilliseconds = 35_000;
 const maximumReconnectDelayMilliseconds = 5_000;
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
@@ -65,10 +65,11 @@ export function sendControlCommand(
   options: CommandClientOptions = {},
 ): Promise<CommandResult> {
   const path = options.path ?? runtimePaths().controlSocket;
-  const timeoutMilliseconds = options.timeoutMilliseconds ?? connectionTimeoutMilliseconds;
+  const timeoutMilliseconds = options.timeoutMilliseconds ?? commandResponseTimeoutMilliseconds;
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     let buffer = Buffer.alloc(0);
+    let connected = false;
     let settled = false;
     const finish = (error: Error | null, result?: CommandResult): void => {
       if (settled) {
@@ -84,11 +85,19 @@ export function sendControlCommand(
       }
     };
     const timeout = setTimeout(
-      () => finish(new ControlClientError("The Toggl daemon is unavailable", "daemon_unavailable")),
+      () =>
+        finish(
+          new ControlClientError(
+            connected
+              ? "The Toggl daemon did not respond in time"
+              : "The Toggl daemon is unavailable",
+            connected ? "request_failed" : "daemon_unavailable",
+          ),
+        ),
       timeoutMilliseconds,
     );
     socket.once("connect", () => {
-      clearTimeout(timeout);
+      connected = true;
       socket.write(`${JSON.stringify(request)}\n`, "utf8");
     });
     socket.on("data", (chunk: Buffer) => {

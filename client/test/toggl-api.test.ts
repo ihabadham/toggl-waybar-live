@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { dayWindowAt } from "../src/day-window.js";
 import { TogglApi } from "../src/toggl-api.js";
@@ -337,5 +337,80 @@ describe("Toggl API", () => {
       { ok: false, error: "request_failed", status: 200 },
     ]);
     expect(JSON.stringify(results)).not.toContain(token);
+  });
+
+  it("aborts and bounds hanging GET and mutation fetches", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const signals: AbortSignal[] = [];
+      const api = new TogglApi(
+        token,
+        async (_input, init) => {
+          if (init?.signal) {
+            signals.push(init.signal);
+          }
+          return new Promise<Response>(() => undefined);
+        },
+        "https://api.track.toggl.com",
+        25,
+      );
+
+      const read = api.fetchCurrent();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(read).resolves.toMatchObject({
+        ok: false,
+        error: "request_failed",
+        mayHaveSucceeded: false,
+        status: null,
+      });
+
+      const mutation = api.stopTimeEntry("202", "101");
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(mutation).resolves.toMatchObject({
+        ok: false,
+        error: "request_failed",
+        mayHaveSucceeded: true,
+        status: null,
+      });
+      expect(signals).toHaveLength(2);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the request deadline active while a successful response body hangs", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let signal: AbortSignal | null = null;
+      const response = Response.json(apiEntry);
+      Object.defineProperty(response, "json", {
+        value: () => new Promise<never>(() => undefined),
+      });
+      const api = new TogglApi(
+        token,
+        async (_input, init) => {
+          signal = init?.signal ?? null;
+          return response;
+        },
+        "https://api.track.toggl.com",
+        25,
+      );
+
+      const mutation = api.stopTimeEntry("202", "101");
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(mutation).resolves.toMatchObject({
+        ok: false,
+        error: "request_failed",
+        mayHaveSucceeded: true,
+        status: 200,
+      });
+      expect(signal).toMatchObject({ aborted: true });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

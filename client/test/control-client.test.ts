@@ -140,6 +140,40 @@ describe("control client", () => {
     );
   }, 4_000);
 
+  it("bounds the full command exchange when a connected daemon never responds", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const path = await socketPath();
+      await mkdir(join(path, ".."), { recursive: true });
+      let acknowledgeRequest!: () => void;
+      const requestReceived = new Promise<void>((resolve) => {
+        acknowledgeRequest = resolve;
+      });
+      const server = createServer((socket) => {
+        rawSockets.add(socket);
+        socket.once("close", () => rawSockets.delete(socket));
+        socket.once("data", acknowledgeRequest);
+      });
+      rawServers.push(server);
+      await new Promise<void>((resolve) => server.listen(path, resolve));
+
+      const command = sendControlCommand(
+        { version: 1, type: "stop" },
+        { path, timeoutMilliseconds: 100 },
+      ).then(
+        () => null,
+        (error: ControlClientError) => error,
+      );
+      await requestReceived;
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(command).resolves.toMatchObject({ code: "request_failed" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("emits one unavailable snapshot per disconnect and reconnects forever", async () => {
     const path = await socketPath();
     const received: ControlSnapshot[] = [];

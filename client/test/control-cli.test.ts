@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -11,9 +12,13 @@ import type { ControlSnapshot } from "../src/control-protocol.js";
 beforeEach(() => {
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => {
-    const child = new EventEmitter() as EventEmitter & { unref(): void };
-    child.unref = vi.fn();
-    queueMicrotask(() => child.emit("spawn"));
+    const child = new EventEmitter() as EventEmitter & {
+      kill(signal?: NodeJS.Signals): boolean;
+      stderr: PassThrough;
+    };
+    child.kill = vi.fn(() => true);
+    child.stderr = new PassThrough();
+    queueMicrotask(() => child.emit("close", 0));
     return child;
   });
 });
@@ -124,9 +129,56 @@ describe("control CLI", () => {
     expect(await runControlCli(["toggle"], dependencies)).toBe(0);
     expect(spawnMock).toHaveBeenCalledWith("toggl-waybar-drawer", ["open"], {
       shell: false,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
     });
     expect(stderr).toEqual([]);
+  });
+
+  it("waits for the drawer command and reports its stderr on failure", async () => {
+    spawnMock.mockImplementationOnce(() => {
+      const child = new EventEmitter() as EventEmitter & {
+        kill(signal?: NodeJS.Signals): boolean;
+        stderr: PassThrough;
+      };
+      child.kill = vi.fn(() => true);
+      child.stderr = new PassThrough();
+      queueMicrotask(() => {
+        child.stderr.end("Unable to open the Toggl drawer\n");
+        child.emit("close", 1);
+      });
+      return child;
+    });
+    const { dependencies, stderr } = outputDependencies({
+      send: async () => result("drawer_required"),
+    });
+
+    expect(await runControlCli(["toggle"], dependencies)).toBe(1);
+    expect(stderr.join("")).toContain("Unable to open the Toggl drawer");
+  });
+
+  it("kills a drawer command that does not finish", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new EventEmitter() as EventEmitter & {
+        kill(signal?: NodeJS.Signals): boolean;
+        stderr: PassThrough;
+      };
+      child.kill = vi.fn(() => true);
+      child.stderr = new PassThrough();
+      spawnMock.mockReturnValueOnce(child);
+      const { dependencies, stderr } = outputDependencies({
+        send: async () => result("drawer_required"),
+      });
+
+      const running = runControlCli(["toggle"], dependencies);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(running).resolves.toBe(1);
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(stderr.join("")).toContain("Toggl drawer command timed out");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports command failures only on stderr", async () => {
