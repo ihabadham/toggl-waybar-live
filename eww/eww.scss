@@ -1,0 +1,198 @@
+$surface: rgba(39, 28, 27, 0.97);
+$surface-raised: rgba(66, 43, 47, 0.9);
+$surface-soft: rgba(201, 140, 175, 0.09);
+$primary: #d58fab;
+$active: #b96f88;
+$text: #f0dfcb;
+$muted: #bfa894;
+$green: #7fad7b;
+$amber: #d6a84f;
+$error: #e47c72;
+$border: rgba(213, 143, 171, 0.22);
+
+* {
+  font-family: "Inter", "Noto Sans", sans-serif;
+  font-size: 13px;
+}
+
+.toggl-overlay,
+.drawer-backdrop {
+  background-color: transparent;
+}
+
+.drawer-backdrop,
+.drawer-backdrop:hover,
+.drawer-backdrop:active {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background-image: none;
+  background-color: transparent;
+}
+
+.toggl-panel {
+  min-width: 360px;
+  padding: 20px 18px 16px;
+  border-left: 1px solid $border;
+  background-color: $surface;
+  color: $text;
+  box-shadow: -10px 0 30px rgba(19, 12, 12, 0.32);
+}
+
+.panel-heading {
+  margin-bottom: 15px;
+}
+
+.eyebrow,
+.section-heading {
+  color: $muted;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+}
+
+.panel-title {
+  margin-top: 2px;
+  color: $text;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.connection {
+  margin-top: 5px;
+  color: $muted;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.connection.connected {
+  color: $green;
+}
+
+.connection.stale {
+  color: $amber;
+}
+
+.timer-summary {
+  padding: 14px;
+  border: 1px solid $border;
+  border-radius: 10px;
+  background-color: $surface-raised;
+}
+
+.today-total,
+.current-elapsed {
+  color: $primary;
+  font-family: "JetBrains Mono", "Noto Sans Mono", monospace;
+  font-weight: 700;
+}
+
+.current-entry,
+.idle-copy {
+  margin-top: 12px;
+}
+
+.current-label {
+  color: $text;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.current-meta,
+.preset-meta,
+.preset-task,
+.preset-tags,
+.idle-copy,
+.empty-presets {
+  color: $muted;
+  font-size: 11px;
+}
+
+.primary-controls {
+  margin-top: 12px;
+}
+
+.stop-button,
+.resume-button,
+.preset-row {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  box-shadow: none;
+  background-image: none;
+  color: $text;
+}
+
+.stop-button,
+.resume-button {
+  min-height: 38px;
+  padding: 0 14px;
+  background-color: $primary;
+  color: #302021;
+  font-weight: 750;
+}
+
+.stop-button:hover,
+.resume-button:hover {
+  background-color: $active;
+  color: $text;
+}
+
+.stop-button:disabled,
+.resume-button:disabled,
+.preset-row:disabled {
+  opacity: 0.45;
+}
+
+.pending-message,
+.error-message {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background-color: rgba(214, 168, 79, 0.1);
+  color: $amber;
+}
+
+.error-message {
+  background-color: rgba(228, 124, 114, 0.1);
+  color: $error;
+}
+
+.recent-presets {
+  margin-top: 17px;
+}
+
+.preset-count {
+  color: $primary;
+}
+
+.empty-presets {
+  margin-top: 10px;
+}
+
+.preset-row {
+  margin-top: 7px;
+  padding: 9px 11px;
+  background-color: $surface-soft;
+}
+
+.preset-row:hover {
+  border-color: rgba(213, 143, 171, 0.35);
+  background-color: rgba(185, 111, 136, 0.18);
+}
+
+.preset-label {
+  color: $text;
+  font-weight: 650;
+}
+
+.billable {
+  color: $green;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.preset-task,
+.preset-tags {
+  margin-top: 2px;
+}

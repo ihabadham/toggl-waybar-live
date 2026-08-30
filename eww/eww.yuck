@@ -1,0 +1,176 @@
+; A generic Waybar click uses toggl-waybar-drawer toggle and follows Sway focus.
+; Per-output modules can use toggl-waybar-drawer toggle --output <sway-output-name>.
+
+(defvar drawer_revealed false)
+
+(deflisten toggl_view
+  :initial "{\"version\":1,\"status\":\"offline\",\"connection\":\"offline\",\"confidence\":\"uncertain\",\"current\":null,\"today\":\"00:00:00\",\"pending\":null,\"error\":\"Toggl daemon unavailable\",\"presets\":[]}"
+  `"__TOGGL_WAYBAR_EXECUTABLE__" watch`)
+
+(defwidget connection-status []
+  (label
+    :class "connection ${toggl_view.connection}"
+    :halign "end"
+    :text "●  ${toggl_view.connection}"))
+
+(defwidget timer-summary []
+  (box
+    :class "timer-summary"
+    :orientation "vertical"
+    :space-evenly false
+    (box
+      :class "section-heading"
+      :space-evenly false
+      (label :halign "start" :hexpand true :text "TODAY")
+      (label :class "today-total" :halign "end" :text toggl_view.today))
+    (box
+      :class "current-entry"
+      :orientation "vertical"
+      :space-evenly false
+      :visible {toggl_view.current != null}
+      (label
+        :class "current-label"
+        :halign "start"
+        :limit-width 34
+        :show-truncated true
+        :text {toggl_view.current?.label ?: "Running"})
+      (box :class "current-meta" :space-evenly false
+        (label
+          :halign "start"
+          :hexpand true
+          :limit-width 24
+          :show-truncated true
+          :text {toggl_view.current?.project ?: ""})
+        (label
+          :class "current-elapsed"
+          :halign "end"
+          :text {toggl_view.current?.elapsed ?: "00:00:00"})))
+    (label
+      :class "idle-copy"
+      :halign "start"
+      :visible {toggl_view.current == null}
+      :text "No timer is running")))
+
+(defwidget primary-controls []
+  (box
+    :class "primary-controls"
+    :orientation "vertical"
+    :space-evenly false
+    (button
+      :class "stop-button"
+      :active {toggl_view.status == "running" && toggl_view.confidence == "confirmed" && toggl_view.pending == null}
+      :visible {toggl_view.status == "running"}
+      :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" stop"
+      (label :text "Stop timer"))
+    (button
+      :class "resume-button"
+      :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && toggl_view.pending == null && arraylength(toggl_view.presets) > 0}
+      :visible {toggl_view.status != "running"}
+      :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" resume && \"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
+      (label :text "Resume last"))
+    (label
+      :class "pending-message"
+      :halign "start"
+      :visible {toggl_view.pending != null}
+      :text {toggl_view.pending ?: ""})
+    (label
+      :class "error-message"
+      :halign "start"
+      :wrap true
+      :visible {toggl_view.error != null}
+      :text {toggl_view.error ?: ""})))
+
+(defwidget preset-row [preset]
+  (button
+    :class "preset-row"
+    :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && toggl_view.pending == null}
+    :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" resume ${preset.id} && \"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
+    (box
+      :orientation "vertical"
+      :space-evenly false
+      (label
+        :class "preset-label"
+        :halign "start"
+        :limit-width 34
+        :show-truncated true
+        :text preset.label)
+      (box :class "preset-meta" :space-evenly false
+        (label
+          :halign "start"
+          :hexpand true
+          :limit-width 26
+          :show-truncated true
+          :text {preset.project != "" ? preset.project : preset.task})
+        (label :class "billable" :visible preset.billable :text "billable"))
+      (label
+        :class "preset-task"
+        :halign "start"
+        :limit-width 34
+        :show-truncated true
+        :visible {preset.task != "" && preset.task != preset.project}
+        :text preset.task)
+      (label
+        :class "preset-tags"
+        :halign "start"
+        :limit-width 34
+        :show-truncated true
+        :visible {arraylength(preset.tags) > 0}
+        :text {jq(preset.tags, "join(\" · \")")}))))
+
+(defwidget recent-presets []
+  (box
+    :class "recent-presets"
+    :orientation "vertical"
+    :space-evenly false
+    (box :class "section-heading" :space-evenly false
+      (label :halign "start" :hexpand true :text "RECENT")
+      (label :class "preset-count" :halign "end" :text "${arraylength(toggl_view.presets)}/8"))
+    (label
+      :class "empty-presets"
+      :halign "start"
+      :visible {arraylength(toggl_view.presets) == 0}
+      :text "Recent activities appear after Toggl syncs.")
+    (for preset in toggl_view.presets
+      (preset-row :preset preset))))
+
+(defwidget toggl-panel []
+  (box
+    :class "toggl-panel"
+    :orientation "vertical"
+    :space-evenly false
+    :width 360
+    :vexpand true
+    (box :class "panel-heading" :space-evenly false
+      (box :orientation "vertical" :space-evenly false :hexpand true
+        (label :class "eyebrow" :halign "start" :text "TOGGL TRACK")
+        (label :class "panel-title" :halign "start" :text "Time drawer"))
+      (connection-status))
+    (timer-summary)
+    (primary-controls)
+    (recent-presets)))
+
+(defwindow toggl-drawer
+  :geometry (geometry
+    :x "0%"
+    :y "0%"
+    :width "100%"
+    :height "100%"
+    :anchor "top right")
+  :stacking "overlay"
+  :exclusive false
+  :focusable true
+  (box
+    :class "toggl-overlay"
+    :orientation "horizontal"
+    :space-evenly false
+    (button
+      :class "drawer-backdrop"
+      :hexpand true
+      :vexpand true
+      :onclick "\"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
+      (label :text ""))
+    (revealer
+      :reveal drawer_revealed
+      :transition "slideleft"
+      :duration "180ms"
+      (toggl-panel))))

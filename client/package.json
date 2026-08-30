@@ -6,10 +6,11 @@
   "bin": {
     "toggl-waybar": "dist/control-cli.js",
     "toggl-waybar-daemon": "dist/daemon.js",
+    "toggl-waybar-drawer": "dist/drawer-controller.js",
     "toggl-waybar-render": "dist/renderer.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-runtime.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run"
   },
