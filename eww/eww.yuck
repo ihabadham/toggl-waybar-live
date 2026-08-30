@@ -1,5 +1,5 @@
-; A generic Waybar click uses toggl-waybar-drawer toggle and follows Sway focus.
-; Per-output modules can use toggl-waybar-drawer toggle --output <sway-output-name>.
+; The default Waybar command opens the drawer on the focused Sway output.
+; To target an output, pass --output <sway-output-name> to toggl-waybar-drawer.
 
 (defvar drawer_revealed false)
 

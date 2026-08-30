@@ -218,7 +218,7 @@ export async function runDrawerController(
         await run("swaymsg", ["mode", drawerMode]);
       }
     } catch {
-      // The drawer remains usable when its optional Escape binding mode is unavailable.
+      // Opening the drawer does not depend on the optional Escape binding mode.
     }
     return 0;
   };
