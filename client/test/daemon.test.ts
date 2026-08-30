@@ -53,6 +53,7 @@ const preset = {
   tagIds: ["505"],
   tags: ["focus"],
   billable: false,
+  projectColor: "#c9806b",
   projectName: "Internal",
   taskName: null,
   lastUsedAt: "2026-08-27T10:00:00Z",
@@ -63,6 +64,7 @@ const createdEntry = {
   workspaceId: "202",
   userId: "303",
   projectId: "404",
+  projectColor: "#c9806b",
   projectName: "Internal",
   description: "Review",
   start: "2026-08-30T12:00:00Z",
@@ -141,6 +143,11 @@ vi.mock("../src/toggl-api.js", () => ({
       return mocks.gates.maintenanceCurrent.promise;
     }
 
+    fetchMonth() {
+      mocks.order.push("reconcile_month");
+      return Promise.resolve(success([]));
+    }
+
     createRunningEntry() {
       mocks.order.push("mutation_create_start");
       return mocks.gates.create.promise;
@@ -176,12 +183,33 @@ describe("daemon integration", () => {
   it("quiesces resources and drains maintenance, mutations, persistence, and publication", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-30T12:00:00Z"));
+    const writes: string[] = [];
+    const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
     try {
-      const daemon = await startDaemon();
+      const starting = startDaemon();
+      await flushMicrotasks();
+      expect(mocks.order).toContain("reconcile_today");
+      expect(mocks.order).not.toContain("reconcile_current");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mocks.order).toContain("reconcile_current");
+      expect(mocks.order).not.toContain("reconcile_month");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const daemon = await starting;
       expect(mocks.order.indexOf("socket_start")).toBeLessThan(
         mocks.order.indexOf("reconcile_today"),
       );
+      expect(mocks.order.indexOf("reconcile_today")).toBeLessThan(
+        mocks.order.indexOf("reconcile_current"),
+      );
       expect(mocks.order.indexOf("reconcile_current")).toBeLessThan(
+        mocks.order.indexOf("reconcile_month"),
+      );
+      expect(mocks.order.indexOf("reconcile_month")).toBeLessThan(
         mocks.order.indexOf("relay_start"),
       );
 
@@ -195,7 +223,7 @@ describe("daemon integration", () => {
       });
       expect(mutation).toBeDefined();
       await flushMicrotasks();
-      expect(mocks.order).toContain("mutation_create_start");
+      expect(mocks.order).not.toContain("mutation_create_start");
 
       const rejected = mocks.state.provider?.handle({
         version: 1,
@@ -206,7 +234,7 @@ describe("daemon integration", () => {
         outcome: "failed",
         error: "command_busy",
       });
-      expect(mocks.order.filter((event) => event === "mutation_create_start")).toHaveLength(1);
+      expect(mocks.order.filter((event) => event === "mutation_create_start")).toHaveLength(0);
 
       let stopSettled = false;
       const stopping = daemon.stop().then(() => {
@@ -220,6 +248,10 @@ describe("daemon integration", () => {
       mocks.gates.maintenanceCurrent.resolve(success(null));
       await flushMicrotasks();
       expect(stopSettled).toBe(false);
+      expect(writes.some((line) => line.includes('"event":"reconciliation_failed"'))).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mocks.order).toContain("mutation_create_start");
 
       mocks.gates.create.resolve(success(createdEntry));
       await flushMicrotasks();
@@ -239,6 +271,7 @@ describe("daemon integration", () => {
       expect(mocks.order.filter((event) => event === "mutation_create_start")).toHaveLength(1);
       expect(mocks.order.at(-1)).toBe("runtime_publish_end");
     } finally {
+      write.mockRestore();
       vi.useRealTimers();
     }
   });

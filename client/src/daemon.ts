@@ -12,6 +12,7 @@ import { RelayClient } from "./relay-client.js";
 import { publishRuntimeState } from "./runtime-file.js";
 import { runtimePaths } from "./runtime-path.js";
 import { TogglApi } from "./toggl-api.js";
+import { TogglRequestScheduler } from "./toggl-request-scheduler.js";
 
 const maintenanceIntervalMilliseconds = 30_000;
 
@@ -34,6 +35,7 @@ export async function startDaemon(): Promise<DaemonController> {
   const presetPath = defaultPresetPath();
   const api = new TogglApi(config.togglApiToken, fetch, config.apiBaseUrl);
   const quota = new QuotaGate();
+  const requestScheduler = new TogglRequestScheduler();
   let publishQueue = Promise.resolve();
   let maintenance: Promise<void> = Promise.resolve();
   let stopped = false;
@@ -54,6 +56,7 @@ export async function startDaemon(): Promise<DaemonController> {
     persistPresets: (presets) => savePresets(presetPath, presets),
     publish,
     quotaGate: quota,
+    requestScheduler,
     timezone: config.timezone,
   });
 
@@ -64,7 +67,7 @@ export async function startDaemon(): Promise<DaemonController> {
       return;
     }
     quota.recordAttempt(action, now);
-    if (!(await coordinator.reconcile(action))) {
+    if ((await coordinator.reconcile(action)) === "failed") {
       log("reconciliation_failed", "warning");
     }
   };
@@ -109,7 +112,7 @@ export async function startDaemon(): Promise<DaemonController> {
   const maintenanceTimer = setInterval(() => {
     maintenance = maintenance
       .then(async () => {
-        coordinator.advanceDay();
+        coordinator.advanceCalendar();
         await reconcile();
       })
       .catch(() => log("maintenance_failed", "error"));

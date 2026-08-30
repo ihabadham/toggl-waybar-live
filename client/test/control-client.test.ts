@@ -18,6 +18,7 @@ import {
 } from "../src/control-server.js";
 import {
   commandResponseTimeoutMilliseconds,
+  maximumBlockingBackgroundTogglRequests,
   maximumInteractiveTogglRequests,
   togglRequestDeadlineMilliseconds,
 } from "../src/control-timing.js";
@@ -97,9 +98,10 @@ afterEach(async () => {
 });
 
 describe("control client", () => {
-  it("allows more time than one worst-case interactive operation", () => {
+  it("allows for one active background request before the interactive request budget", () => {
     expect(commandResponseTimeoutMilliseconds).toBeGreaterThan(
-      togglRequestDeadlineMilliseconds * maximumInteractiveTogglRequests,
+      togglRequestDeadlineMilliseconds *
+        (maximumInteractiveTogglRequests + maximumBlockingBackgroundTogglRequests),
     );
   });
 

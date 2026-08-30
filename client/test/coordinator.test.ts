@@ -9,6 +9,10 @@ import {
 import type { ResumePreset } from "../src/presets.js";
 import { createState, setConnection } from "../src/state.js";
 import { type ApiResult, type RichTogglEntry, TogglApi } from "../src/toggl-api.js";
+import {
+  type CoordinatorRequestScheduler,
+  TogglRequestScheduler,
+} from "../src/toggl-request-scheduler.js";
 
 const presetId = "11111111-1111-4111-8111-111111111111";
 const now = new Date("2026-08-27T12:00:00Z");
@@ -128,6 +132,7 @@ function changed(value: RichTogglEntry, action: "created" | "updated" = "updated
 function api(overrides: Partial<CoordinatorApi> = {}): CoordinatorApi {
   return {
     fetchToday: vi.fn(async () => success([])),
+    fetchMonth: vi.fn(async () => success([])),
     fetchCurrent: vi.fn(async () => success(null)),
     createRunningEntry: vi.fn(async () => success(entry())),
     stopTimeEntry: vi.fn(async (_workspaceId, entryId) =>
@@ -143,6 +148,15 @@ function api(overrides: Partial<CoordinatorApi> = {}): CoordinatorApi {
   };
 }
 
+function immediateScheduler(): CoordinatorRequestScheduler {
+  return {
+    runControl: (operation) => operation(),
+    runBackground: async (operation, stillRelevant) =>
+      stillRelevant() ? { status: "completed", value: await operation() } : { status: "skipped" },
+    drain: async () => undefined,
+  };
+}
+
 function coordinator(
   apiValue: CoordinatorApi,
   options: {
@@ -154,6 +168,8 @@ function coordinator(
     persistPresets?: (presets: readonly ResumePreset[]) => Promise<void>;
     quotaGate?: ClientCoordinatorOptions["quotaGate"];
     quotaRecord?: (result: ApiResult<unknown>, now: number) => void;
+    requestScheduler?: CoordinatorRequestScheduler;
+    now?: () => Date;
   } = {},
 ): ClientCoordinator {
   let initialState = createState("2026-08-27");
@@ -164,7 +180,8 @@ function coordinator(
     api: apiValue,
     timezone: "Africa/Cairo",
     quotaGate: options.quotaGate ?? { record: options.quotaRecord ?? vi.fn() },
-    now: () => now,
+    requestScheduler: options.requestScheduler ?? immediateScheduler(),
+    now: options.now ?? (() => now),
     ...(options.monotonicNow === undefined ? {} : { monotonicNow: options.monotonicNow }),
     initialState,
     initialConfidence: options.confidence ?? "confirmed",
@@ -429,14 +446,14 @@ describe("client coordinator", () => {
     expect(createRunningEntry).not.toHaveBeenCalled();
   });
 
-  it("discards background timer data after either a relay revision or mutation acceptance", async () => {
+  it("returns skipped when a relay or command supersedes background timer data", async () => {
     const first = deferred<ApiResult<RichTogglEntry | null>>();
     const fetchCurrent = vi.fn(() => first.promise);
     const instance = coordinator(api({ fetchCurrent }), { initialPresets: [] });
     const reconciliation = instance.reconcile("current");
     instance.applyRelay(runningSnapshot(entry({ id: "external" })));
     first.resolve(success(null));
-    await expect(reconciliation).resolves.toBe(false);
+    await expect(reconciliation).resolves.toBe("skipped");
     expect(instance.snapshot().current?.id).toBe("external");
 
     const second = deferred<ApiResult<RichTogglEntry | null>>();
@@ -444,7 +461,7 @@ describe("client coordinator", () => {
     const nextReconciliation = instance.reconcile("current");
     const stop = instance.stop();
     second.resolve(success(null));
-    await expect(nextReconciliation).resolves.toBe(false);
+    await expect(nextReconciliation).resolves.toBe("skipped");
     await stop;
   });
 
@@ -457,7 +474,7 @@ describe("client coordinator", () => {
 
     const command = instance.resume();
     await vi.waitFor(() => expect(instance.snapshot().pending).toBe("resuming"));
-    await expect(instance.reconcile("current")).resolves.toBe(false);
+    await expect(instance.reconcile("current")).resolves.toBe("skipped");
     expect(fetchCurrent).not.toHaveBeenCalled();
     created.resolve(success(entry()));
     await command;
@@ -745,7 +762,7 @@ describe("client coordinator", () => {
   it("does not spend the quota reserve on relay conflict confirmation", async () => {
     const stale = entry({ id: "700", description: "Delayed stale timer" });
     const fetchCurrent = vi.fn(async () => success(null));
-    const allowsRequest = vi.fn(() => false);
+    const allowsRequest = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
     const recordAttempt = vi.fn();
     const instance = coordinator(api({ fetchCurrent }), {
       connected: false,
@@ -764,7 +781,7 @@ describe("client coordinator", () => {
       error: "quota_exhausted",
     });
     expect(fetchCurrent).toHaveBeenCalledTimes(1);
-    expect(allowsRequest).toHaveBeenCalledTimes(1);
+    expect(allowsRequest).toHaveBeenCalledTimes(2);
     expect(recordAttempt).not.toHaveBeenCalled();
   });
 
@@ -1011,7 +1028,7 @@ describe("client coordinator", () => {
       confidence: "uncertain",
     });
 
-    await expect(instance.reconcile("current")).resolves.toBe(true);
+    await expect(instance.reconcile("current")).resolves.toBe("completed");
     instance.applyRelay(idleSnapshot("2099-08-27T11:59:59Z"));
 
     expect(instance.snapshot().current?.id).toBe(current.id);
@@ -1261,7 +1278,7 @@ describe("client coordinator", () => {
     await expect(instance.resume()).resolves.toMatchObject({ error: "ambiguous_create" });
     await expect(instance.resume()).resolves.toMatchObject({ error: "ambiguous_create" });
     expect(createRunningEntry).toHaveBeenCalledTimes(1);
-    await expect(instance.reconcile("current")).resolves.toBe(true);
+    await expect(instance.reconcile("current")).resolves.toBe("completed");
     await instance.resume();
     expect(createRunningEntry).toHaveBeenCalledTimes(2);
   });
@@ -1273,6 +1290,255 @@ describe("client coordinator", () => {
     await instance.resume();
     expect(record).toHaveBeenCalledTimes(2);
     expect(record.mock.calls.every((call) => call[0].quota === quota)).toBe(true);
+  });
+
+  it("reconciles full state in Today, current, then month order without overlap", async () => {
+    const order: string[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    async function requested<T>(name: string, result: T): Promise<T> {
+      order.push(name);
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return result;
+    }
+    const instance = coordinator(
+      api({
+        fetchToday: vi.fn(() => requested("today", success([]))),
+        fetchCurrent: vi.fn(() => requested("current", success(null))),
+        fetchMonth: vi.fn(() => requested("month", success([]))),
+      }),
+    );
+
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+
+    expect(order).toEqual(["today", "current", "month"]);
+    expect(maximumActive).toBe(1);
+  });
+
+  it("refreshes the month at startup and again only after one hour", async () => {
+    let clock = new Date("2026-08-27T12:00:00Z");
+    const fetchMonth = vi.fn(async () => success([]));
+    const instance = coordinator(api({ fetchMonth }), { now: () => clock });
+
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+    clock = new Date("2026-08-27T12:59:59.999Z");
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+    expect(fetchMonth).toHaveBeenCalledTimes(1);
+
+    clock = new Date("2026-08-27T13:00:00Z");
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+    expect(fetchMonth).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let reconnect refresh requests bypass the hourly month guard", async () => {
+    let clock = new Date("2026-08-27T12:00:00Z");
+    const fetchMonth = vi.fn(async () => success([]));
+    const instance = coordinator(api({ fetchMonth }), { now: () => clock });
+
+    await instance.reconcile("full");
+    instance.setConnection("stale");
+    instance.setConnection("connected");
+    clock = new Date("2026-08-27T12:30:00Z");
+    await instance.reconcile("full");
+    expect(fetchMonth).toHaveBeenCalledTimes(1);
+
+    clock = new Date("2026-08-27T13:00:00Z");
+    await instance.reconcile("full");
+    expect(fetchMonth).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let month rollover bypass the hourly refresh guard", async () => {
+    let clock = new Date("2026-08-31T20:30:00Z");
+    const fetchMonth = vi.fn(async (_window: Parameters<CoordinatorApi["fetchMonth"]>[0]) =>
+      success([]),
+    );
+    const instance = coordinator(api({ fetchMonth }), { now: () => clock });
+
+    await instance.reconcile("full");
+    clock = new Date("2026-08-31T21:01:00Z");
+    instance.advanceCalendar();
+    await instance.reconcile("full");
+    expect(fetchMonth).toHaveBeenCalledTimes(1);
+
+    clock = new Date("2026-08-31T21:30:00Z");
+    await instance.reconcile("full");
+    expect(fetchMonth).toHaveBeenCalledTimes(2);
+    expect(fetchMonth.mock.calls.map(([window]) => window.monthKey)).toEqual([
+      "2026-08",
+      "2026-09",
+    ]);
+  });
+
+  it("skips the optional month read when the quota reserve is reached after core reads", async () => {
+    const fetchCurrent = vi.fn(async () => success(null));
+    const fetchMonth = vi.fn(async () => success([]));
+    const allowsRequest = vi.fn(() => fetchCurrent.mock.calls.length === 0);
+    const instance = coordinator(api({ fetchCurrent, fetchMonth }), {
+      quotaGate: { allowsRequest, record: vi.fn() },
+    });
+
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+
+    expect(fetchCurrent).toHaveBeenCalledTimes(1);
+    expect(fetchMonth).not.toHaveBeenCalled();
+    expect(instance.snapshot()).toMatchObject({ error: null });
+  });
+
+  it("keeps a successful core refresh and prior month data when the optional month read fails", async () => {
+    let clock = new Date("2026-08-27T12:00:00Z");
+    const prior = entry({
+      id: "month-prior",
+      start: "2026-08-10T08:00:00Z",
+      stop: "2026-08-10T08:20:00Z",
+      durationSeconds: 1_200,
+    });
+    const recent = entry({
+      id: "today-recent",
+      start: "2026-08-27T11:55:00Z",
+      stop: "2026-08-27T12:00:00Z",
+      durationSeconds: 300,
+    });
+    let refresh = 0;
+    const fetchToday = vi.fn(async () => success(refresh === 0 ? [] : [recent]));
+    const fetchMonth = vi.fn(async () => (refresh++ === 0 ? success([prior]) : failure()));
+    const instance = coordinator(api({ fetchToday, fetchMonth }), { now: () => clock });
+
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+    expect(instance.snapshot().month).toMatchObject({
+      availability: "ready",
+      completedSeconds: 1_200,
+    });
+
+    clock = new Date("2026-08-27T13:00:00Z");
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+    expect(instance.snapshot()).toMatchObject({
+      completedTodaySeconds: 300,
+      error: null,
+      month: {
+        availability: "stale",
+        completedSeconds: 1_500,
+        partial: false,
+      },
+    });
+  });
+
+  it("marks a 1,000-row month response partial", async () => {
+    const monthEntries = Array.from({ length: 1_000 }, (_, index) =>
+      entry({
+        id: `month-${index}`,
+        start: "2026-08-10T08:00:00Z",
+        stop: "2026-08-10T08:01:00Z",
+        durationSeconds: 60,
+      }),
+    );
+    const instance = coordinator(api({ fetchMonth: vi.fn(async () => success(monthEntries)) }));
+
+    await expect(instance.reconcile("full")).resolves.toBe("completed");
+    expect(instance.snapshot().month).toMatchObject({
+      availability: "ready",
+      completedSeconds: 60_000,
+      partial: true,
+    });
+  });
+
+  it("does not let a stale month result overwrite a webhook mutation", async () => {
+    const monthResult = deferred<ApiResult<RichTogglEntry[]>>();
+    const webhookEntry = entry({
+      id: "webhook-entry",
+      start: "2026-08-27T11:53:00Z",
+      stop: "2026-08-27T12:00:00Z",
+      durationSeconds: 420,
+    });
+    const staleEntry = entry({
+      id: "stale-month-entry",
+      start: "2026-08-10T08:00:00Z",
+      stop: "2026-08-10T10:00:00Z",
+      durationSeconds: 7_200,
+    });
+    const fetchMonth = vi.fn(() => monthResult.promise);
+    const instance = coordinator(api({ fetchMonth }));
+
+    const reconciliation = instance.reconcile("full");
+    await vi.waitFor(() => expect(fetchMonth).toHaveBeenCalledTimes(1));
+    instance.applyRelay(changed(webhookEntry));
+    monthResult.resolve(success([staleEntry]));
+
+    await expect(reconciliation).resolves.toBe("completed");
+    expect(instance.snapshot()).toMatchObject({
+      completedTodaySeconds: 420,
+      month: { completedSeconds: 420 },
+    });
+  });
+
+  it("discards a month result after a relay snapshot changes the current timer", async () => {
+    const monthResult = deferred<ApiResult<RichTogglEntry[]>>();
+    const replacement = entry({ id: "replacement", description: "Replacement timer" });
+    const staleEntry = entry({
+      id: "stale-month-entry",
+      start: "2026-08-10T08:00:00Z",
+      stop: "2026-08-10T10:00:00Z",
+      durationSeconds: 7_200,
+    });
+    const fetchMonth = vi.fn(() => monthResult.promise);
+    const instance = coordinator(api({ fetchMonth }));
+    instance.applyRelay(idleSnapshot("2026-08-27T11:59:59Z", "9"));
+
+    const reconciliation = instance.reconcile("full");
+    await vi.waitFor(() => expect(fetchMonth).toHaveBeenCalledTimes(1));
+    instance.applyRelay(runningSnapshot(replacement));
+    monthResult.resolve(success([staleEntry]));
+
+    await expect(reconciliation).resolves.toBe("completed");
+    expect(instance.snapshot()).toMatchObject({
+      current: { id: replacement.id },
+      month: { availability: "unavailable", completedSeconds: 0 },
+    });
+  });
+
+  it("does not let a stale month result overwrite an accepted local stop", async () => {
+    const original = entry({ id: "local-entry", start: "2026-08-27T11:50:00Z" });
+    const stopped = entry({
+      ...original,
+      stop: "2026-08-27T12:00:00Z",
+      durationSeconds: 600,
+    });
+    const staleEntry = entry({
+      id: "stale-month-entry",
+      start: "2026-08-10T08:00:00Z",
+      stop: "2026-08-10T10:00:00Z",
+      durationSeconds: 7_200,
+    });
+    const monthResult = deferred<ApiResult<RichTogglEntry[]>>();
+    const fetchMonth = vi.fn(() => monthResult.promise);
+    const instance = coordinator(
+      api({
+        fetchCurrent: vi.fn(async () => success(original)),
+        fetchMonth,
+        stopTimeEntry: vi.fn(async () => success(stopped)),
+      }),
+      {
+        initialCurrent: original,
+        requestScheduler: new TogglRequestScheduler({
+          minimumStartIntervalMilliseconds: 0,
+        }),
+      },
+    );
+
+    const reconciliation = instance.reconcile("full");
+    await vi.waitFor(() => expect(fetchMonth).toHaveBeenCalledTimes(1));
+    const stop = instance.stop();
+    expect(instance.snapshot().pending).toBeNull();
+    monthResult.resolve(success([staleEntry]));
+
+    await expect(reconciliation).resolves.toBe("completed");
+    await expect(stop).resolves.toMatchObject({ outcome: "stopped" });
+    expect(instance.snapshot()).toMatchObject({
+      completedTodaySeconds: 600,
+      month: { completedSeconds: 600 },
+    });
   });
 
   it("refreshes and persists presets only when rich REST data changes the list", async () => {
@@ -1343,6 +1609,7 @@ describe("client coordinator", () => {
       api: api(),
       timezone: "Africa/Cairo",
       quotaGate: { record: vi.fn() },
+      requestScheduler: immediateScheduler(),
       now: () => now,
       initialState: setConnection(createState("2026-08-27"), "connected"),
       initialConfidence: "confirmed",

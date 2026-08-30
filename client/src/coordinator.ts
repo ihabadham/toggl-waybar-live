@@ -19,6 +19,8 @@ import {
   completedMonthSeconds,
   createMonthState,
   type MonthState,
+  markMonthRefreshFailed,
+  replaceReconciledMonthEntries,
 } from "./month-state.js";
 import { instantBelongsToMonth, type MonthWindow, monthWindowAt } from "./month-window.js";
 import {
@@ -46,12 +48,15 @@ import {
   toRendererState,
 } from "./state.js";
 import type { ApiResult, RichTogglEntry, TogglApi } from "./toggl-api.js";
+import type { CoordinatorRequestScheduler } from "./toggl-request-scheduler.js";
 
 const toggleSuppressionMilliseconds = 800;
+const monthRefreshIntervalMilliseconds = 60 * 60 * 1_000;
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
 type Confidence = "confirmed" | "uncertain";
 type ReconciliationKind = "current" | "full";
+export type ReconciliationOutcome = "completed" | "failed" | "skipped";
 type RelayChangeMessage = Extract<RelayMessage, { type: "entry.changed" }>;
 type RelaySnapshotMessage = Extract<RelayMessage, { type: "snapshot" }>;
 
@@ -66,6 +71,7 @@ type CoordinatorQuotaGate = Pick<QuotaGate, "record"> &
 export interface CoordinatorApi {
   createRunningEntry(activity: ResumeActivity, start: string): Promise<ApiResult<RichTogglEntry>>;
   fetchCurrent(): Promise<ApiResult<RichTogglEntry | null>>;
+  fetchMonth(window: MonthWindow): Promise<ApiResult<RichTogglEntry[]>>;
   fetchToday(window: DayWindow): Promise<ApiResult<RichTogglEntry[]>>;
   stopTimeEntry(workspaceId: string, entryId: string): Promise<ApiResult<RichTogglEntry>>;
 }
@@ -82,6 +88,7 @@ export interface ClientCoordinatorOptions {
   persistPresets?: (presets: readonly ResumePreset[]) => Promise<void>;
   publish?: (snapshot: ControlSnapshot, rendererState: RendererState) => void;
   quotaGate: CoordinatorQuotaGate;
+  requestScheduler: CoordinatorRequestScheduler;
   timezone: string;
 }
 
@@ -162,7 +169,10 @@ export class ClientCoordinator {
   private commandActive = false;
   private confidence: Confidence;
   private error: ControlErrorCode | null = null;
+  private lastMonthAttemptAt: number | null = null;
   private lastToggleArrival: number | null = null;
+  private monthRefreshRequested = true;
+  private monthRevision = 0;
   private monthState: MonthState;
   private mutationActive = false;
   private mutationEpoch = 0;
@@ -296,6 +306,9 @@ export class ClientCoordinator {
   }
 
   setConnection(connection: ClientState["connection"]): void {
+    if ((this.state.connection === "connected") !== (connection === "connected")) {
+      this.monthRefreshRequested = true;
+    }
     this.commit(setConnection(this.state, connection), {
       ...(connection === "connected" ? {} : { confidence: "uncertain" as const }),
     });
@@ -303,12 +316,12 @@ export class ClientCoordinator {
 
   advanceCalendar(): void {
     const now = this.now();
-    this.monthState = advanceMonth(this.monthState, this.monthWindow(now));
+    const monthState = advanceMonth(this.monthState, this.monthWindow(now));
+    if (monthState !== this.monthState) {
+      this.monthRefreshRequested = true;
+      this.updateMonthState(monthState);
+    }
     this.commit(advanceClientDay(this.state, this.window(now)));
-  }
-
-  advanceDay(): void {
-    this.advanceCalendar();
   }
 
   applyRelay(message: RelayMessage): void {
@@ -381,9 +394,9 @@ export class ClientCoordinator {
     }
   }
 
-  async reconcile(kind: ReconciliationKind): Promise<boolean> {
+  async reconcile(kind: ReconciliationKind): Promise<ReconciliationOutcome> {
     if (this.commandActive || this.relayConfirmationActive) {
-      return false;
+      return "skipped";
     }
     const revision = this.timerRevision;
     const epoch = this.mutationEpoch;
@@ -392,36 +405,65 @@ export class ClientCoordinator {
     const window = this.window(now);
 
     if (kind === "current") {
-      const current = await this.api.fetchCurrent();
+      const scheduled = await this.options.requestScheduler.runBackground(
+        () => this.api.fetchCurrent(),
+        () => this.backgroundRelevant(revision, epoch, relayGeneration),
+      );
+      if (scheduled.status === "skipped") {
+        return "skipped";
+      }
+      const current = scheduled.value;
       this.recordQuota(current);
       if (this.stale(revision, epoch, relayGeneration)) {
-        return false;
+        return "skipped";
       }
       if (!current.ok) {
         this.commit(this.state, { error: apiError(current) });
-        return false;
+        return "failed";
       }
       this.commitRestCurrent(current.data, window);
-      return true;
+      return "completed";
     }
 
-    const [today, current] = await Promise.all([
-      this.api.fetchToday(window),
-      this.api.fetchCurrent(),
-    ]);
+    const scheduledToday = await this.options.requestScheduler.runBackground(
+      () => this.api.fetchToday(window),
+      () => this.backgroundRelevant(revision, epoch, relayGeneration),
+    );
+    if (scheduledToday.status === "skipped") {
+      return "skipped";
+    }
+    const today = scheduledToday.value;
     this.recordQuota(today);
+    if (this.stale(revision, epoch, relayGeneration)) {
+      return "skipped";
+    }
+    if (!today.ok && !this.quotaAllowsRequest()) {
+      this.commit(this.state, { error: apiError(today) });
+      return "failed";
+    }
+
+    const scheduledCurrent = await this.options.requestScheduler.runBackground(
+      () => this.api.fetchCurrent(),
+      () => this.backgroundRelevant(revision, epoch, relayGeneration),
+    );
+    if (scheduledCurrent.status === "skipped") {
+      return "skipped";
+    }
+    const current = scheduledCurrent.value;
     this.recordQuota(current);
     if (this.stale(revision, epoch, relayGeneration)) {
-      return false;
+      return "skipped";
     }
+
     if (!today.ok) {
       this.commit(this.state, { error: apiError(today) });
-      return false;
+      return "failed";
     }
     if (!current.ok) {
       this.commit(this.state, { error: apiError(current) });
-      return false;
+      return "failed";
     }
+
     const synchronizedAt = this.timestamp();
     let next = replaceReconciledEntries(
       this.state,
@@ -435,9 +477,73 @@ export class ClientCoordinator {
     }
     next = this.confirmRestCurrent(next, current.data);
     this.ambiguousCreateUnresolved = false;
+    this.mergeMonthEntries(
+      [...today.data, ...(current.data === null ? [] : [current.data])],
+      this.monthWindow(now),
+    );
     this.commit(next, { confidence: "confirmed", error: null });
     await this.refreshPresets([...today.data, ...(current.data === null ? [] : [current.data])]);
-    return true;
+
+    const monthNow = this.now();
+    const monthWindow = this.monthWindow(monthNow);
+    if (!this.monthRefreshDue(monthNow.getTime()) || !this.quotaAllowsRequest()) {
+      return "completed";
+    }
+    const monthRevision = this.monthRevision;
+    const monthTimerRevision = this.timerRevision;
+    const monthEpoch = this.mutationEpoch;
+    const monthRelayGeneration = this.relayConflictGeneration;
+    const scheduledMonth = await this.options.requestScheduler.runBackground(
+      () => {
+        this.lastMonthAttemptAt = this.now().getTime();
+        return this.api.fetchMonth(monthWindow);
+      },
+      () =>
+        this.monthResultRelevant(
+          monthWindow,
+          monthRevision,
+          monthTimerRevision,
+          monthEpoch,
+          monthRelayGeneration,
+        ) && this.quotaAllowsRequest(),
+    );
+    if (scheduledMonth.status === "skipped") {
+      return "completed";
+    }
+    const month = scheduledMonth.value;
+    this.recordQuota(month);
+    if (
+      !this.monthResultRelevant(
+        monthWindow,
+        monthRevision,
+        monthTimerRevision,
+        monthEpoch,
+        monthRelayGeneration,
+      )
+    ) {
+      return "completed";
+    }
+    if (!month.ok) {
+      this.monthRefreshRequested = true;
+      this.updateMonthState(markMonthRefreshFailed(this.monthState, monthWindow));
+      this.commit(this.state);
+      return "completed";
+    }
+
+    let reconciledMonth = replaceReconciledMonthEntries(
+      this.monthState,
+      month.data,
+      monthWindow,
+      this.timestamp(),
+      month.data.length >= 1_000,
+    );
+    if (current.data !== null) {
+      reconciledMonth = applyMonthEntry(reconciledMonth, current.data, monthWindow);
+    }
+    this.monthRefreshRequested = false;
+    this.updateMonthState(reconciledMonth);
+    this.commit(this.state);
+    return "completed";
   }
 
   async drain(): Promise<void> {
@@ -454,6 +560,7 @@ export class ClientCoordinator {
         break;
       }
     }
+    await this.options.requestScheduler.drain();
     await this.persistenceTail;
   }
 
@@ -475,6 +582,54 @@ export class ClientCoordinator {
 
   private monthWindow(now: string | Date): MonthWindow {
     return monthWindowAt(now, this.options.timezone);
+  }
+
+  private quotaAllowsRequest(): boolean {
+    return this.options.quotaGate.allowsRequest?.(this.now().getTime()) !== false;
+  }
+
+  private backgroundRelevant(revision: number, epoch: number, relayGeneration: number): boolean {
+    return this.quotaAllowsRequest() && !this.stale(revision, epoch, relayGeneration);
+  }
+
+  private monthRefreshDue(now: number): boolean {
+    if (this.lastMonthAttemptAt === null) {
+      return this.monthRefreshRequested;
+    }
+    return now - this.lastMonthAttemptAt >= monthRefreshIntervalMilliseconds;
+  }
+
+  private monthResultRelevant(
+    window: MonthWindow,
+    revision: number,
+    timerRevision: number,
+    epoch: number,
+    relayGeneration: number,
+  ): boolean {
+    return (
+      !this.commandActive &&
+      revision === this.monthRevision &&
+      timerRevision === this.timerRevision &&
+      epoch === this.mutationEpoch &&
+      relayGeneration === this.relayConflictGeneration &&
+      window.monthKey === this.monthState.monthKey
+    );
+  }
+
+  private mergeMonthEntries(entries: readonly RichTogglEntry[], window: MonthWindow): void {
+    let next = this.monthState;
+    for (const entry of entries) {
+      next = applyMonthEntry(next, entry, window);
+    }
+    this.updateMonthState(next);
+  }
+
+  private updateMonthState(next: MonthState): void {
+    if (next === this.monthState) {
+      return;
+    }
+    this.monthState = next;
+    this.monthRevision += 1;
   }
 
   private stale(revision: number, epoch: number, relayGeneration: number): boolean {
@@ -513,10 +668,8 @@ export class ClientCoordinator {
   }
 
   private commitRelayMessage(message: RelayMessage, window: DayWindow): void {
-    this.monthState = applyMonthRelayMessage(
-      this.monthState,
-      message,
-      this.monthWindow(this.now()),
+    this.updateMonthState(
+      applyMonthRelayMessage(this.monthState, message, this.monthWindow(this.now())),
     );
     const next = applyRelayMessage(this.state, message, window);
     const confidence =
@@ -618,7 +771,7 @@ export class ClientCoordinator {
     const mutationEpoch = this.mutationEpoch;
     const relayGeneration = this.relayConflictGeneration;
     const confirmation = Promise.resolve()
-      .then(() => this.api.fetchCurrent())
+      .then(() => this.options.requestScheduler.runControl(() => this.api.fetchCurrent()))
       .then((current) => {
         this.recordQuota(current);
         if (
@@ -729,7 +882,7 @@ export class ClientCoordinator {
     }
     const revision = this.timerRevision;
     const relayGeneration = this.relayConflictGeneration;
-    const current = await this.api.fetchCurrent();
+    const current = await this.options.requestScheduler.runControl(() => this.api.fetchCurrent());
     this.recordQuota(current);
     if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
       const trusted = this.confidence === "confirmed" && !this.relayConflictUnresolved;
@@ -770,14 +923,14 @@ export class ClientCoordinator {
     }
 
     this.commit(setPending(this.state, "stopping"), { error: null });
-    const stopped = await this.api.stopTimeEntry(target.workspaceId, target.id);
+    const stopped = await this.options.requestScheduler.runControl(() =>
+      this.api.stopTimeEntry(target.workspaceId, target.id),
+    );
     this.recordQuota(stopped);
     const window = this.window(this.now());
     if (stopped.ok) {
-      this.monthState = applyMonthEntry(
-        this.monthState,
-        stopped.data,
-        this.monthWindow(this.now()),
+      this.updateMonthState(
+        applyMonthEntry(this.monthState, stopped.data, this.monthWindow(this.now())),
       );
       const next = setPending(applyRichStopResult(this.state, stopped.data, window), null);
       this.confirmStoppedEntry(target.id, next);
@@ -802,7 +955,7 @@ export class ClientCoordinator {
     if (stopped.status === 404) {
       const revision = this.timerRevision;
       const relayGeneration = this.relayConflictGeneration;
-      const current = await this.api.fetchCurrent();
+      const current = await this.options.requestScheduler.runControl(() => this.api.fetchCurrent());
       this.recordQuota(current);
       if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
         return this.finishMissingStopFromCurrentState(target.id);
@@ -870,7 +1023,9 @@ export class ClientCoordinator {
     this.commit(setPending(this.state, "resuming"), { error: null });
     const activity = activityFromPreset(preset);
     const start = this.timestamp();
-    const created = await this.api.createRunningEntry(activity, start);
+    const created = await this.options.requestScheduler.runControl(() =>
+      this.api.createRunningEntry(activity, start),
+    );
     this.recordQuota(created);
     const window = this.window(this.now());
 
@@ -879,10 +1034,8 @@ export class ClientCoordinator {
       const conflictingCurrent = currentId !== null && currentId !== created.data.id;
       const next = setPending(applyRichCreateResult(this.state, created.data, window), null);
       if (next.current?.id === created.data.id) {
-        this.monthState = applyMonthEntry(
-          this.monthState,
-          created.data,
-          this.monthWindow(this.now()),
+        this.updateMonthState(
+          applyMonthEntry(this.monthState, created.data, this.monthWindow(this.now())),
         );
         this.confirmLocalCurrent(next, created.data);
       }
@@ -905,7 +1058,7 @@ export class ClientCoordinator {
 
     const revision = this.timerRevision;
     const relayGeneration = this.relayConflictGeneration;
-    const current = await this.api.fetchCurrent();
+    const current = await this.options.requestScheduler.runControl(() => this.api.fetchCurrent());
     this.recordQuota(current);
     if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
       if (this.confidence !== "confirmed") {
@@ -941,7 +1094,7 @@ export class ClientCoordinator {
   private async reconcileCurrentWithinMutation(): Promise<void> {
     const revision = this.timerRevision;
     const relayGeneration = this.relayConflictGeneration;
-    const current = await this.api.fetchCurrent();
+    const current = await this.options.requestScheduler.runControl(() => this.api.fetchCurrent());
     this.recordQuota(current);
     if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
       return;
