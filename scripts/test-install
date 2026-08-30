@@ -42,6 +42,7 @@ for command_name in node openssl mktemp sed dirname mkdir rm chmod mv cp; do
   ln -s "$command_path" "$fake_binary_directory/$command_name"
 done
 env_binary=$(command -v env)
+sleep_binary=$(command -v sleep)
 timeout_binary=$(command -v timeout)
 
 fake_npm_log=$temporary_root/npm.log
@@ -125,8 +126,18 @@ grep -F 'Eww is required' "$temporary_root/drawer-missing.err" >/dev/null ||
   fail 'missing-Eww failure was not actionable'
 [ ! -e "$client_directory/drawer-controller.mjs" ] || fail 'failed drawer setup installed a bundle'
 
-printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_binary_directory/eww"
-printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_binary_directory/swaymsg"
+drawer_command_log=$temporary_root/eww.log
+printf '%s\n' \
+  '#!/bin/sh' \
+  '[ -z "${EWW_LOG:-}" ] || printf "%s\\n" "$*" >>"$EWW_LOG"' \
+  'exit 0' >"$fake_binary_directory/eww"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'case " $* " in' \
+  '  *" get_workspaces "*) printf "[{\"focused\":true,\"output\":\"DP-1\"}]\n" ;;' \
+  '  *" get_binding_modes "*) printf "[]\n" ;;' \
+  'esac' \
+  'exit 0' >"$fake_binary_directory/swaymsg"
 chmod 0755 "$fake_binary_directory/eww" "$fake_binary_directory/swaymsg"
 
 HOME="$test_home" \
@@ -157,6 +168,7 @@ expected_npm_invocations=4
   fail 'drawer setup invoked npm'
 
 if grep -R -E '__TOGGL_WAYBAR_[A-Z_]+__' \
+  "$client_directory/toggl-waybar.mjs" \
   "$client_directory/drawer-controller.mjs" \
   "$eww_config_directory/eww.yuck"; then
   fail 'drawer setup left an unresolved placeholder'
@@ -191,8 +203,46 @@ run_installed_command() {
     XDG_STATE_HOME="$state_root" \
     XDG_RUNTIME_DIR="$runtime_root" \
     TOGGL_WAYBAR_BIN_DIR="$binary_directory" \
+    EWW_LOG="$drawer_command_log" \
     PATH="$fake_binary_directory" \
     "$@"
+}
+
+start_drawer_required_server() {
+  control_directory=$runtime_root/toggl-waybar-live
+  control_socket=$control_directory/control.sock
+  mkdir -p "$control_directory"
+  rm -f "$control_socket"
+  "$fake_binary_directory/node" -e '
+    const { unlinkSync } = require("node:fs");
+    const { createServer } = require("node:net");
+    const path = process.argv[1];
+    const server = createServer((socket) => {
+      socket.once("data", () => {
+        socket.end(`${JSON.stringify({
+          version: 1,
+          type: "result",
+          outcome: "drawer_required",
+          error: null,
+        })}\n`);
+        server.close(() => {
+          try { unlinkSync(path); } catch {}
+        });
+      });
+    });
+    const watchdog = setTimeout(() => process.exit(2), 5_000);
+    server.listen(path);
+    server.once("close", () => clearTimeout(watchdog));
+  ' "$control_socket" &
+  drawer_server_pid=$!
+  attempts=0
+  while [ ! -S "$control_socket" ]; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 500 ] || ! kill -0 "$drawer_server_pid" 2>/dev/null; then
+      fail 'fake control server did not start'
+    fi
+    "$sleep_binary" 0.01
+  done
 }
 
 run_unconfigured_daemon() {
@@ -224,6 +274,37 @@ if (cd "$other_directory" && \
 fi
 grep -F 'Usage: toggl-waybar' "$temporary_root/cli.err" >/dev/null ||
   fail 'installed CLI did not launch outside the repository'
+
+start_drawer_required_server
+if ! (cd "$other_directory" && \
+  run_installed_command "$timeout_binary" 10 "$binary_directory/toggl-waybar" toggle \
+    >"$temporary_root/drawer-fallback.out" 2>"$temporary_root/drawer-fallback.err"); then
+  sed -n '1,20p' "$temporary_root/drawer-fallback.err" >&2
+  fail 'installed CLI did not launch its drawer outside PATH'
+fi
+wait "$drawer_server_pid" || fail 'fake control server failed during drawer fallback'
+grep -F 'open toggl-drawer' "$drawer_command_log" >/dev/null ||
+  fail 'installed CLI did not invoke the baked drawer path'
+
+printf '%s\n' '#!/bin/sh' 'printf "fake Eww failure\\n" >&2' 'exit 1' \
+  >"$fake_binary_directory/eww"
+chmod 0755 "$fake_binary_directory/eww"
+start_drawer_required_server
+drawer_failure_status=0
+(cd "$other_directory" && \
+  run_installed_command "$timeout_binary" 10 "$binary_directory/toggl-waybar" toggle \
+    >"$temporary_root/drawer-failure.out" 2>"$temporary_root/drawer-failure.err") ||
+  drawer_failure_status=$?
+[ "$drawer_failure_status" -ne 0 ] || fail 'installed CLI hid a drawer controller failure'
+[ "$drawer_failure_status" -ne 124 ] || fail 'installed CLI hung on a drawer controller failure'
+wait "$drawer_server_pid" || fail 'fake control server failed during drawer failure test'
+grep -F 'fake Eww failure' "$temporary_root/drawer-failure.err" >/dev/null ||
+  fail 'installed CLI did not surface drawer controller stderr'
+printf '%s\n' \
+  '#!/bin/sh' \
+  '[ -z "${EWW_LOG:-}" ] || printf "%s\\n" "$*" >>"$EWW_LOG"' \
+  'exit 0' >"$fake_binary_directory/eww"
+chmod 0755 "$fake_binary_directory/eww"
 
 export TOGGL_API_TOKEN='host-sentinel-api-token'
 export TOGGL_API_BASE_URL='http://127.0.0.1:9'

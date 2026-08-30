@@ -19,7 +19,6 @@ import { drawerView } from "./drawer-view.js";
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
 
-const installedDrawerExecutable = "__TOGGL_WAYBAR_DRAWER_EXECUTABLE__";
 const drawerExecutionTimeoutMilliseconds = 30_000;
 const maximumDrawerErrorCharacters = 4_096;
 
@@ -107,18 +106,16 @@ function parseArguments(arguments_: readonly string[]): ControlRequest | null {
   return parsed.success ? parsed.data : null;
 }
 
-function drawerExecutable(): string {
-  return installedDrawerExecutable.startsWith("__TOGGL_WAYBAR_")
-    ? "toggl-waybar-drawer"
-    : installedDrawerExecutable;
-}
-
 function defaultInvokeDrawer(): Promise<boolean> {
   return new Promise((resolve, reject) => {
-    const child = spawn(drawerExecutable(), ["open"], {
-      shell: false,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
+    const child = spawn(
+      process.env.TOGGL_WAYBAR_DRAWER_EXECUTABLE || "toggl-waybar-drawer",
+      ["open"],
+      {
+        shell: false,
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
     let errorOutput = "";
     let settled = false;
     const finish = (result: () => void): void => {

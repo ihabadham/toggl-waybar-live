@@ -240,6 +240,8 @@ node_command=$(shell_quote "$node_binary")
 } >"$renderer_wrapper_temporary"
 {
   printf '%s\n' '#!/bin/sh'
+  printf 'export TOGGL_WAYBAR_DRAWER_EXECUTABLE=%s\n' \
+    "$(shell_quote "$binary_directory/toggl-waybar-drawer")"
   printf 'exec %s %s "$@"\n' "$node_command" "$(shell_quote "$client_directory/toggl-waybar.mjs")"
 } >"$cli_wrapper_temporary"
 
