@@ -553,6 +553,7 @@ try {
   };
   currentEntry = runningEntry;
   replaceTodayEntry(runningEntry);
+  const initialStartCounts = apiCounts();
   const startResponse = await sendWebhook("POST", runningEntry);
   assert(startResponse.status === 204, `Start webhook returned ${startResponse.status}`);
 
@@ -566,6 +567,12 @@ try {
       ),
   );
   await waitFor("watch running state", () => latestWatch()?.current?.label === "Simulation");
+  assertApiDelta("initial start webhook confirmation", initialStartCounts, {
+    reads: 1,
+    writes: 0,
+    creates: 0,
+    stops: 0,
+  });
   const beforeTick = rendererLines.map((_lines, index) => latestRendererText(index));
   const readsBeforeTick = fakeApiReads;
   const writesBeforeTick = fakeApiWrites;
@@ -789,7 +796,7 @@ try {
   assert(firstRenderer.exitCode === null && secondRenderer.exitCode === null, "A renderer exited early");
   assert(watcher.exitCode === null, "The socket watch exited early");
   const totals = apiCounts();
-  assert(totals.reads === 4, `Expected exactly 4 Toggl reads, received ${totals.reads}`);
+  assert(totals.reads === 5, `Expected exactly 5 Toggl reads, received ${totals.reads}`);
   assert(totals.writes === 6, `Expected exactly 6 Toggl writes, received ${totals.writes}`);
   assert(totals.creates === 3, `Expected exactly 3 Toggl creates, received ${totals.creates}`);
   assert(totals.stops === 3, `Expected exactly 3 Toggl stops, received ${totals.stops}`);
