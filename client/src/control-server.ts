@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, link, lstat, mkdir, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { TextDecoder } from "node:util";
 
 import {
@@ -236,7 +236,7 @@ export async function startControlServer(
     sockets.set(socket, reject);
     socket.once("close", () => sockets.delete(socket));
   });
-  const boundPath = `${options.path}.${process.pid}.${randomUUID()}.bound`;
+  const boundPath = join(directory, `.b-${randomBytes(6).toString("base64url")}`);
   await listen(server, boundPath);
 
   let created: Stats;

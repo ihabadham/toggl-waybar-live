@@ -198,6 +198,17 @@ describe("control server", () => {
     await expect(startControlServer({ path, provider: source })).rejects.toThrow("collide");
   });
 
+  it("keeps the private staging socket within Unix path limits", async () => {
+    const directory = await mkdtemp(join(tmpdir(), `toggl-${"x".repeat(50)}-`));
+    directories.push(directory);
+    const path = join(directory, "runtime", "control.sock");
+
+    const server = await startControlServer({ path, provider: provider() });
+    servers.push(server);
+
+    expect((await stat(path)).isSocket()).toBe(true);
+  });
+
   it("recovers a stale socket left by a dead daemon", async () => {
     const path = await socketPath();
     await mkdir(join(path, ".."), { recursive: true });
