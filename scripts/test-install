@@ -41,6 +41,8 @@ for command_name in node openssl mktemp sed dirname mkdir rm chmod mv cp; do
   command_path=$(command -v "$command_name")
   ln -s "$command_path" "$fake_binary_directory/$command_name"
 done
+env_binary=$(command -v env)
+timeout_binary=$(command -v timeout)
 
 fake_npm_log=$temporary_root/npm.log
 printf '%s\n' \
@@ -181,32 +183,67 @@ drawer_checksums_after=$(cksum \
 [ "$drawer_checksums_before" = "$drawer_checksums_after" ] ||
   fail 'core setup changed installed drawer files'
 
-if (cd "$other_directory" && \
-  XDG_RUNTIME_DIR= "$binary_directory/toggl-waybar-render" >"$temporary_root/renderer.out"); then
-  grep -F 'Toggl offline' "$temporary_root/renderer.out" >/dev/null ||
-    fail 'installed renderer did not emit offline output'
-else
-  fail 'installed renderer did not launch outside the repository'
-fi
+run_installed_command() {
+  "$env_binary" -i \
+    HOME="$test_home" \
+    XDG_CONFIG_HOME="$config_root" \
+    XDG_DATA_HOME="$data_root" \
+    XDG_STATE_HOME="$state_root" \
+    XDG_RUNTIME_DIR="$runtime_root" \
+    TOGGL_WAYBAR_BIN_DIR="$binary_directory" \
+    PATH="$fake_binary_directory" \
+    "$@"
+}
+
+run_unconfigured_daemon() {
+  "$env_binary" -i \
+    HOME="$test_home" \
+    XDG_CONFIG_HOME="$config_root" \
+    XDG_DATA_HOME="$data_root" \
+    XDG_STATE_HOME="$state_root" \
+    XDG_RUNTIME_DIR="$runtime_root" \
+    PATH="$fake_binary_directory" \
+    "$@"
+}
+
+renderer_status=0
+(cd "$other_directory" && \
+  run_installed_command "$timeout_binary" 2 "$binary_directory/toggl-waybar-render" \
+    >"$temporary_root/renderer.out") || renderer_status=$?
+case "$renderer_status" in
+  0 | 124) ;;
+  *) fail 'installed renderer did not launch outside the repository' ;;
+esac
+grep -F 'Toggl offline' "$temporary_root/renderer.out" >/dev/null ||
+  fail 'installed renderer did not emit offline output'
 
 if (cd "$other_directory" && \
-  "$binary_directory/toggl-waybar" invalid \
+  run_installed_command "$timeout_binary" 5 "$binary_directory/toggl-waybar" invalid \
     >"$temporary_root/cli.out" 2>"$temporary_root/cli.err"); then
   fail 'installed CLI accepted invalid arguments'
 fi
 grep -F 'Usage: toggl-waybar' "$temporary_root/cli.err" >/dev/null ||
   fail 'installed CLI did not launch outside the repository'
 
-if (cd "$other_directory" && \
-  "$binary_directory/toggl-waybar-daemon" \
-    >"$temporary_root/daemon.out" 2>"$temporary_root/daemon.err"); then
+export TOGGL_API_TOKEN='host-sentinel-api-token'
+export TOGGL_API_BASE_URL='http://127.0.0.1:9'
+export TOGGL_TIMEZONE='UTC'
+export TOGGL_RELAY_URL='ws://127.0.0.1:9/ws'
+export TOGGL_RELAY_TOKEN='host-sentinel-relay-token'
+export TOGGL_LABEL_MAX_CHARS='99'
+daemon_status=0
+(cd "$other_directory" && \
+  run_unconfigured_daemon "$timeout_binary" 5 "$binary_directory/toggl-waybar-daemon" \
+    >"$temporary_root/daemon.out" 2>"$temporary_root/daemon.err") || daemon_status=$?
+if [ "$daemon_status" -eq 0 ]; then
   fail 'installed daemon unexpectedly started without configuration'
 fi
+[ "$daemon_status" -ne 124 ] || fail 'installed daemon inherited host Toggl configuration and hung'
 grep -F 'daemon_start_failed' "$temporary_root/daemon.out" >/dev/null ||
   fail 'installed daemon did not launch outside the repository'
 
 (cd "$other_directory" && \
-  PATH="$fake_binary_directory" "$binary_directory/toggl-waybar-drawer" close \
+  run_installed_command "$timeout_binary" 5 "$binary_directory/toggl-waybar-drawer" close \
     >"$temporary_root/drawer-launch.out" 2>"$temporary_root/drawer-launch.err") ||
   fail 'installed drawer command did not launch outside the repository'
 

@@ -34,6 +34,79 @@ function assert(condition, message) {
   }
 }
 
+function apiCounts() {
+  return {
+    reads: fakeApiReads,
+    writes: fakeApiWrites,
+    creates: createRequests.length,
+    stops: stopRequests.length,
+  };
+}
+
+function assertApiDelta(label, before, expected) {
+  const after = apiCounts();
+  for (const key of ["reads", "writes", "creates", "stops"]) {
+    const actualDelta = after[key] - before[key];
+    assert(
+      actualDelta === expected[key],
+      `${label} made ${actualDelta} ${key}; expected ${expected[key]}`,
+    );
+  }
+}
+
+function assertJsonValue(actual, expected, message) {
+  assert(JSON.stringify(actual) === JSON.stringify(expected), message);
+}
+
+function assertCreateRequest(label, request, expected, commandStartedAt) {
+  assert(request, `${label} did not reach the fake Toggl API`);
+  assert(request.url === expected.url, `${label} used the wrong Toggl route`);
+  const expectedBody = {
+    created_with: "toggl-waybar-live",
+    workspace_id: expected.workspaceId,
+    description: expected.description,
+    project_id: expected.projectId,
+    task_id: expected.taskId,
+    tag_ids: expected.tagIds,
+    tags: expected.tags,
+    billable: expected.billable,
+    start: request.body.start,
+    duration: -1,
+    stop: null,
+  };
+  assertJsonValue(
+    Object.keys(request.body).sort(),
+    Object.keys(expectedBody).sort(),
+    `${label} POST body had missing or extra fields`,
+  );
+  for (const key of Object.keys(expectedBody)) {
+    if (key !== "start") {
+      assertJsonValue(
+        request.body[key],
+        expectedBody[key],
+        `${label} POST body had the wrong ${key}`,
+      );
+    }
+  }
+  assert(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(request.body.start),
+    `${label} start was not an RFC3339 UTC timestamp`,
+  );
+  const startMilliseconds = Date.parse(request.body.start);
+  assert(
+    Number.isFinite(startMilliseconds) &&
+      startMilliseconds >= commandStartedAt - 1_000 &&
+      startMilliseconds <= Date.now() + 1_000,
+    `${label} start was not a plausible current timestamp`,
+  );
+}
+
+function assertStopRequest(label, request, expectedUrl) {
+  assert(request, `${label} did not reach the fake Toggl API`);
+  assert(request.url === expectedUrl, `${label} used the wrong Toggl route`);
+  assert(request.body === "", `${label} PATCH unexpectedly sent a request body`);
+}
+
 async function unusedPort() {
   const server = createServer();
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
@@ -83,12 +156,12 @@ async function cleanup() {
 process.once("SIGINT", () => void cleanup().finally(() => process.exit(130)));
 process.once("SIGTERM", () => void cleanup().finally(() => process.exit(143)));
 
-async function requestJson(request) {
+async function requestBody(request) {
   const chunks = [];
   for await (const chunk of request) {
     chunks.push(chunk);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return Buffer.concat(chunks);
 }
 
 function json(response, status, value) {
@@ -136,8 +209,9 @@ async function handleFakeApi(request, response) {
 
   const createMatch = request.url?.match(/^\/api\/v9\/workspaces\/(\d+)\/time_entries$/);
   if (request.method === "POST" && createMatch) {
-    const body = await requestJson(request);
-    createRequests.push({ url: request.url, body });
+    const rawBody = await requestBody(request);
+    const body = JSON.parse(rawBody.toString("utf8"));
+    createRequests.push({ url: request.url, rawBody: rawBody.toString("utf8"), body });
     if (failNextCreateAmbiguously) {
       failNextCreateAmbiguously = false;
       json(response, 500, { error: "ambiguous_create" });
@@ -171,6 +245,13 @@ async function handleFakeApi(request, response) {
     /^\/api\/v9\/workspaces\/(\d+)\/time_entries\/(\d+)\/stop$/,
   );
   if (request.method === "PATCH" && stopMatch) {
+    const rawBody = await requestBody(request);
+    const stopRequest = { url: request.url, body: rawBody.toString("utf8") };
+    stopRequests.push(stopRequest);
+    if (rawBody.length !== 0) {
+      json(response, 400, { error: "stop_body_must_be_empty" });
+      return;
+    }
     if (currentEntry === null || String(currentEntry.id) !== stopMatch[2]) {
       json(response, 409, { error: "already_stopped" });
       return;
@@ -187,7 +268,7 @@ async function handleFakeApi(request, response) {
     };
     currentEntry = null;
     replaceTodayEntry(stoppedEntry);
-    stopRequests.push({ url: request.url, entry: stoppedEntry });
+    stopRequest.entry = stoppedEntry;
     json(response, 200, { data: stoppedEntry });
     return;
   }
@@ -459,8 +540,8 @@ try {
     user_id: 303,
     project_id: 404,
     project_name: "Internal",
-    task_id: null,
-    task_name: null,
+    task_id: 808,
+    task_name: "Review",
     description: "Simulation",
     tag_ids: [707],
     tags: ["review"],
@@ -507,61 +588,144 @@ try {
     "Invalid HMAC changed renderer state",
   );
 
-  let readsBeforeCommand = fakeApiReads;
-  let writesBeforeCommand = fakeApiWrites;
+  const initialStopCounts = apiCounts();
   const stopResult = await runCli("stop");
   assert(stopResult.exitCode === 0, `Socket stop failed: ${stopResult.stderr}`);
-  assert(fakeApiReads === readsBeforeCommand, "Trusted stop made an unexpected Toggl read");
-  assert(fakeApiWrites === writesBeforeCommand + 1, "Stop did not make exactly one Toggl write");
-  assert(stopRequests.at(-1)?.url === "/api/v9/workspaces/202/time_entries/101/stop", "Stop used the wrong Toggl route");
+  assertApiDelta("initial stop", initialStopCounts, {
+    reads: 0,
+    writes: 1,
+    creates: 0,
+    stops: 1,
+  });
+  assertStopRequest(
+    "initial stop",
+    stopRequests.at(-1),
+    "/api/v9/workspaces/202/time_entries/101/stop",
+  );
   const firstStoppedEntry = stopRequests.at(-1).entry;
+  const stopEchoCounts = apiCounts();
   const stopEcho = await sendWebhook("PATCH", firstStoppedEntry);
   assert(stopEcho.status === 204, `Stop webhook echo returned ${stopEcho.status}`);
   await waitFor(
     "idle state after socket stop",
     () => latestWatch()?.status === "idle" && latestWatch()?.presets?.length === 2,
   );
+  assertApiDelta("initial stop webhook echo", stopEchoCounts, {
+    reads: 0,
+    writes: 0,
+    creates: 0,
+    stops: 0,
+  });
 
-  writesBeforeCommand = fakeApiWrites;
+  const resumeLastCounts = apiCounts();
+  const resumeLastStartedAt = Date.now();
   const resumeLastResult = await runCli("resume");
   assert(resumeLastResult.exitCode === 0, `Resume-last failed: ${resumeLastResult.stderr}`);
-  assert(fakeApiWrites === writesBeforeCommand + 1, "Resume-last did not make one Toggl write");
+  assertApiDelta("resume-last", resumeLastCounts, {
+    reads: 0,
+    writes: 1,
+    creates: 1,
+    stops: 0,
+  });
   const resumeLastRequest = createRequests.at(-1);
-  assert(resumeLastRequest.body.description === "Simulation", "Resume-last chose the wrong preset");
-  assert(resumeLastRequest.body.created_with === "toggl-waybar-live", "Resume-last omitted created_with");
-  assert(resumeLastRequest.url === "/api/v9/workspaces/202/time_entries", "Resume-last used the wrong Toggl route");
+  assertCreateRequest(
+    "resume-last",
+    resumeLastRequest,
+    {
+      url: "/api/v9/workspaces/202/time_entries",
+      workspaceId: 202,
+      description: "Simulation",
+      projectId: 404,
+      taskId: 808,
+      tagIds: [707],
+      tags: ["review"],
+      billable: false,
+    },
+    resumeLastStartedAt,
+  );
+  const resumeLastEchoCounts = apiCounts();
   const resumeLastEcho = await sendWebhook("POST", resumeLastRequest.entry);
   assert(resumeLastEcho.status === 204, `Resume-last webhook echo returned ${resumeLastEcho.status}`);
   await waitFor("resume-last watch state", () => latestWatch()?.current?.label === "Simulation");
+  assertApiDelta("resume-last webhook echo", resumeLastEchoCounts, {
+    reads: 0,
+    writes: 0,
+    creates: 0,
+    stops: 0,
+  });
 
+  const intermediateStopCounts = apiCounts();
   const stopResumedResult = await runCli("stop");
   assert(stopResumedResult.exitCode === 0, `Stopping resumed timer failed: ${stopResumedResult.stderr}`);
   await waitFor("idle before selected resume", () => latestWatch()?.status === "idle");
+  assertApiDelta("intermediate stop", intermediateStopCounts, {
+    reads: 0,
+    writes: 1,
+    creates: 0,
+    stops: 1,
+  });
+  assertStopRequest(
+    "intermediate stop",
+    stopRequests.at(-1),
+    `/api/v9/workspaces/202/time_entries/${resumeLastRequest.entry.id}/stop`,
+  );
   const planningPreset = latestWatch()?.presets?.find((preset) => preset.label === "Planning");
   assert(planningPreset, "Selected-resume preset was not present in the watch view");
 
-  writesBeforeCommand = fakeApiWrites;
+  const selectedResumeCounts = apiCounts();
+  const selectedResumeStartedAt = Date.now();
   const resumeSelectedResult = await runCli("resume", planningPreset.id);
   assert(resumeSelectedResult.exitCode === 0, `Resume-selected failed: ${resumeSelectedResult.stderr}`);
-  assert(fakeApiWrites === writesBeforeCommand + 1, "Resume-selected did not make one Toggl write");
+  assertApiDelta("selected resume", selectedResumeCounts, {
+    reads: 0,
+    writes: 1,
+    creates: 1,
+    stops: 0,
+  });
   const resumeSelectedRequest = createRequests.at(-1);
-  assert(resumeSelectedRequest.body.description === "Planning", "Resume-selected chose the wrong preset");
-  assert(resumeSelectedRequest.body.project_id === 405, "Resume-selected lost its project");
-  assert(resumeSelectedRequest.body.task_id === 505, "Resume-selected lost its task");
-  assert(resumeSelectedRequest.body.billable === true, "Resume-selected lost billable state");
+  assertCreateRequest(
+    "selected resume",
+    resumeSelectedRequest,
+    {
+      url: "/api/v9/workspaces/202/time_entries",
+      workspaceId: 202,
+      description: "Planning",
+      projectId: 405,
+      taskId: 505,
+      tagIds: [606],
+      tags: ["focused"],
+      billable: true,
+    },
+    selectedResumeStartedAt,
+  );
+  const selectedEchoCounts = apiCounts();
   const selectedEcho = await sendWebhook("POST", resumeSelectedRequest.entry);
   assert(selectedEcho.status === 204, `Resume-selected webhook echo returned ${selectedEcho.status}`);
   await waitFor("selected resume watch state", () => latestWatch()?.current?.label === "Planning");
+  assertApiDelta("selected resume webhook echo", selectedEchoCounts, {
+    reads: 0,
+    writes: 0,
+    creates: 0,
+    stops: 0,
+  });
 
   await terminate(worker);
   worker = null;
   await waitFor("stale state", async () => (await readRuntimeState())?.connection === "stale", 5_000);
-  readsBeforeCommand = fakeApiReads;
-  writesBeforeCommand = fakeApiWrites;
+  const staleToggleCounts = apiCounts();
   const staleToggleResult = await runCli("toggle");
   assert(staleToggleResult.exitCode === 0, `Stale-state toggle failed: ${staleToggleResult.stderr}`);
-  assert(fakeApiReads === readsBeforeCommand + 1, "Stale toggle did not confirm current state once");
-  assert(fakeApiWrites === writesBeforeCommand + 1, "Stale toggle did not stop exactly once");
+  assertApiDelta("stale-state toggle", staleToggleCounts, {
+    reads: 1,
+    writes: 1,
+    creates: 0,
+    stops: 1,
+  });
+  assertStopRequest(
+    "stale-state toggle",
+    stopRequests.at(-1),
+    `/api/v9/workspaces/202/time_entries/${resumeSelectedRequest.entry.id}/stop`,
+  );
   const staleStopEntry = stopRequests.at(-1).entry;
 
   worker = startWorker();
@@ -571,38 +735,72 @@ try {
     async () => (await readRuntimeState())?.connection === "connected",
     5_000,
   );
+  const staleEchoCounts = apiCounts();
   const staleStopEcho = await sendWebhook("PATCH", staleStopEntry);
   assert(staleStopEcho.status === 204, `Stale-stop webhook echo returned ${staleStopEcho.status}`);
   await waitFor("idle after stale-stop echo", () => latestWatch()?.status === "idle");
+  assertApiDelta("stale webhook echo", staleEchoCounts, {
+    reads: 0,
+    writes: 0,
+    creates: 0,
+    stops: 0,
+  });
 
   failNextCreateAmbiguously = true;
   failNextCurrentRead = true;
-  readsBeforeCommand = fakeApiReads;
-  writesBeforeCommand = fakeApiWrites;
+  const ambiguousCounts = apiCounts();
+  const ambiguousStartedAt = Date.now();
   const ambiguousResult = await runCli("resume", planningPreset.id);
   assert(ambiguousResult.exitCode === 1, "Ambiguous create unexpectedly succeeded");
   assert(ambiguousResult.stderr.includes("ambiguous_create"), "Ambiguous create was not reported");
-  assert(fakeApiWrites === writesBeforeCommand + 1, "Ambiguous create was blindly retried");
-  assert(fakeApiReads === readsBeforeCommand + 1, "Ambiguous create did not reconcile exactly once");
   await waitFor("ambiguous watch error", () => latestWatch()?.error?.includes("may have started"));
+  assertApiDelta("ambiguous create flow", ambiguousCounts, {
+    reads: 1,
+    writes: 1,
+    creates: 1,
+    stops: 0,
+  });
+  assertCreateRequest(
+    "ambiguous selected resume",
+    createRequests.at(-1),
+    {
+      url: "/api/v9/workspaces/202/time_entries",
+      workspaceId: 202,
+      description: "Planning",
+      projectId: 405,
+      taskId: 505,
+      tagIds: [606],
+      tags: ["focused"],
+      billable: true,
+    },
+    ambiguousStartedAt,
+  );
 
-  const writesBeforeBlockedResume = fakeApiWrites;
-  const readsBeforeBlockedResume = fakeApiReads;
+  const blockedResumeCounts = apiCounts();
   const blockedResume = await runCli("resume", planningPreset.id);
   assert(blockedResume.exitCode === 1, "Resume was not blocked after an ambiguous create");
-  assert(fakeApiWrites === writesBeforeBlockedResume, "Blocked resume made another Toggl write");
-  assert(fakeApiReads === readsBeforeBlockedResume, "Blocked resume made an unexpected Toggl read");
+  assertApiDelta("blocked retry", blockedResumeCounts, {
+    reads: 0,
+    writes: 0,
+    creates: 0,
+    stops: 0,
+  });
 
   assert(firstRenderer.exitCode === null && secondRenderer.exitCode === null, "A renderer exited early");
   assert(watcher.exitCode === null, "The socket watch exited early");
+  const totals = apiCounts();
+  assert(totals.reads === 4, `Expected exactly 4 Toggl reads, received ${totals.reads}`);
+  assert(totals.writes === 6, `Expected exactly 6 Toggl writes, received ${totals.writes}`);
+  assert(totals.creates === 3, `Expected exactly 3 Toggl creates, received ${totals.creates}`);
+  assert(totals.stops === 3, `Expected exactly 3 Toggl stops, received ${totals.stops}`);
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
       renderers: 2,
-      fakeTogglReads: fakeApiReads,
-      fakeTogglWrites: fakeApiWrites,
-      createRequests: createRequests.length,
-      stopRequests: stopRequests.length,
+      fakeTogglReads: totals.reads,
+      fakeTogglWrites: totals.writes,
+      createRequests: totals.creates,
+      stopRequests: totals.stops,
       assertions: [
         "local_tick",
         "invalid_hmac",

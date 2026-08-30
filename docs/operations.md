@@ -135,6 +135,7 @@ rm ~/.config/systemd/user/toggl-waybar-live.service
 rm -rf ~/.config/toggl-waybar-live
 rm -rf ~/.local/share/toggl-waybar-live
 rm -rf ~/.local/state/toggl-waybar-live
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/toggl-waybar-live"
 rm ~/.local/bin/toggl-waybar-daemon ~/.local/bin/toggl-waybar-render
 rm ~/.local/bin/toggl-waybar ~/.local/bin/toggl-waybar-drawer
 systemctl --user daemon-reload
@@ -142,5 +143,6 @@ systemctl --user daemon-reload
 
 Adjust the XDG and launcher paths if non-default locations were used. These
 commands remove only this project's named files and directories, including
-persisted presets. The Cloudflare and Toggl deletions are separate so local
-removal cannot silently leave a webhook or hosted relay behind.
+persisted presets and its disposable cache. The Cloudflare and Toggl deletions
+are separate so local removal cannot silently leave a webhook or hosted relay
+behind.

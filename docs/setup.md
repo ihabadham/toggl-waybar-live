@@ -8,7 +8,8 @@ credentials.
 ## Install dependencies
 
 Core requirements: Node.js 22 or newer, npm, OpenSSL, systemd user services,
-and Waybar. Eww is optional and needed only for the drawer.
+and Waybar. The optional drawer requires Eww v0.6.0, its compatibility target;
+install it with the [official Eww installation guide](https://elkowar.github.io/eww/#how-to-install-eww).
 
 ```sh
 npm install
@@ -175,7 +176,8 @@ may each run a renderer without adding WebSocket or Toggl requests.
 
 ## Install the optional drawer
 
-Install Eww through your operating system first, then run:
+Install the supported Eww v0.6.0 first, following the official guide linked
+above, then run:
 
 ```sh
 ./scripts/configure-drawer
