@@ -1,7 +1,5 @@
 # Local write controls and Toggl drawer
 
-Status: approved for implementation
-
 ## Goal
 
 Add safe local controls for stopping the current Toggl timer, resuming the
@@ -26,14 +24,20 @@ drawer. A mouse invocation opens it on the Waybar output that received the
 click. A keyboard invocation opens it on the currently focused output. Only
 one drawer is visible at a time.
 
-While running, the drawer shows the current activity, live duration, project,
-today's total, and a prominent Stop button. Recent activities remain visible
-but cannot be selected until the current timer stops. Stopping from the drawer
-keeps it open so another activity can be selected.
+The drawer keeps its actions ahead of history: current activity and primary
+Stop or Resume Last control, up to eight Quick Resume rows, then Today and This
+Month at a glance. Quick Resume remains visible but disabled while a timer is
+running. Stopping from the drawer keeps it open; choosing an activity while
+idle starts it and closes the drawer.
 
-While idle, the drawer shows Resume Last and up to eight recent activities.
-Selecting one starts it and closes the drawer. Escape, clicking outside, or
-repeating the drawer shortcut closes it. Errors stay visible in the drawer.
+Today starts collapsed each time the drawer opens. Its glance shows the live
+total and entry count; selecting it reveals newest-first rows with description,
+project/task context, local start-stop range, and duration. Running rows and
+the Today total tick locally. This Month shows a compact hours-and-minutes
+total, with visible stale or partial cues when applicable.
+
+Escape, clicking outside, or repeating the drawer shortcut closes it. Errors
+stay visible in the drawer.
 
 The recent list contains distinct resumable activities rather than raw time
 entries. Identity is the exact combination of workspace, description, project,
@@ -64,6 +68,11 @@ The Worker, Durable Object, webhook protocol, and relay WebSocket protocol do
 not change. Webhooks continue to confirm mutations and capture changes made by
 other Toggl clients.
 
+All Toggl REST reads, writes, and confirmation requests pass through one local
+scheduler. It permits one active request, spaces request starts by at least one
+second, and gives admitted control work priority over queued background reads.
+Queued background work is discarded if newer state makes its result irrelevant.
+
 ### Local control protocol
 
 A new credential-free CLI communicates with the daemon through a Unix socket
@@ -78,7 +87,9 @@ The watch command emits newline-delimited JSON view models for Eww. Commands
 use constrained command names and preset identifiers; descriptions and other
 user-controlled labels are never parsed as shell commands or identifiers.
 Requests and responses use a small versioned, runtime-validated local schema.
-Malformed and oversized messages are rejected.
+Malformed and oversized messages are rejected. Frames are capped at 64 KiB;
+the daemon keeps projected snapshots within 48 KiB by including at most 50
+newest Today rows and reporting the number of earlier rows omitted.
 
 The daemon admits only one mutation at a time. Concurrent commands fail fast
 instead of waiting in a write backlog. State commits from commands, relay
@@ -106,6 +117,26 @@ Presets update from rich REST responses and successful local mutations. The
 narrow hosted webhook protocol is not expanded. A relay event may update timing
 state without erasing richer local resume metadata. Presets survive midnight,
 daemon restarts, and cache cleanup.
+
+### Today and month projection
+
+The daemon owns the Today timeline and current-month aggregate in memory. Both
+use local day or month boundaries in the configured IANA timezone, with an
+entry attributed to the period in which it started. Entries spanning a
+boundary are not split. Repeated descriptions remain separate time-entry rows.
+
+The drawer receives bounded Today rows and only the month aggregate, never full
+month history. A single local one-second tick advances the current timer, Today
+total, running Today row, and eligible month total from the latest watch
+snapshot. Ticking does not open another subscription, reread configuration, or
+call Toggl.
+
+The month read is optional and runs at most hourly inside full reconciliation,
+after Today and current state succeed. Before its first success, the drawer
+shows an em dash. A later failure preserves the last value and marks it stale.
+A response reaching the 1,000-entry ceiling is treated as partial and displayed
+as a lower bound with `≥`; partial and stale cues can appear together. Month
+availability never disables Stop, Resume Last, or Quick Resume.
 
 ## Mutation behavior
 
@@ -153,16 +184,16 @@ during shutdown; it does not hold the interactive response open.
 The UI may show `Stopping…` or `Resuming…`, but it does not claim the underlying
 state changed until Toggl accepts the request. Toggl quota headers from writes
 feed the same local quota accounting used by reconciliation, and interactive
-commands take priority over background refreshes. Ambiguous relay bursts admit
-at most one current-entry confirmation at a time; that confirmation is recorded
-in the same quota gate and is skipped while its reserve is active.
+commands take priority over queued background refreshes. Ambiguous relay bursts
+admit at most one current-entry confirmation at a time; that confirmation is
+recorded in the same quota gate and is skipped while its reserve is active.
 
 ## Eww integration
 
 Eww is an optional presentation dependency. The project supplies a dedicated
-configuration with a right-anchored Wayland window, a slide transition, the
-live watch stream, and buttons that invoke the local CLI. Eww receives no
-credentials and performs no network requests.
+configuration with a right-anchored Wayland window, a slide transition, one
+scrollable action-first surface, the live watch stream, and buttons that invoke
+the local CLI. Eww receives no credentials and performs no network requests.
 
 The project does not install Eww through a system package manager. A separate
 drawer setup command validates the dependency and installs only this project's
@@ -195,7 +226,9 @@ Automated coverage includes:
 - stale-state confirmation and ambiguous creation recovery;
 - startup idle fencing, create-before-stop external switches, webhook echoes,
   and reconciliation races;
-- the live drawer view stream; and
+- bounded Today/month projections and the one-second local drawer tick;
+- prioritized, serialized, and paced Toggl request scheduling;
+- Today disclosure reset, month cues, and the live drawer view stream; and
 - fake-Toggl end-to-end stop, resume-last, and resume-selected flows.
 
 Manual verification covers mouse and keyboard control, animation and focus,

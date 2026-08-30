@@ -27,10 +27,15 @@ Restarting performs an immediate full reconciliation and reconnects the relay:
 systemctl --user restart toggl-waybar-live.service
 ```
 
-The disconnected worst case is 18 Toggl requests per hour: six two-request
-full reconciliations and six current-only checks. The gate stops with six quota
-slots remaining and honors Toggl's reset header. The visible timer continues
-locally while stale and is marked with `⚠`.
+The scheduled-maintenance worst case is 19 Toggl requests per hour: twelve from
+six full Today/current reconciliations, six disconnected current-only checks,
+and one hourly month refresh. That leaves eleven requests below Toggl's
+documented 30-request quota before user-triggered writes or conflict checks.
+The shared quota gate is stricter in practice: it stops background work when
+Toggl reports six or fewer requests remaining and honors the reset header.
+One local scheduler serializes and paces every request, while admitted controls
+take priority over queued maintenance. The visible timer continues locally
+while stale and is marked with `⚠`.
 
 If the runtime file is corrupt or missing, renderers show `Toggl offline` until
 the daemon publishes a valid replacement. Runtime state lives under
@@ -52,6 +57,31 @@ stable messages have these meanings:
 Recent activities are stored separately at
 `${XDG_STATE_HOME:-$HOME/.local/state}/toggl-waybar-live/presets.json` with mode
 `0600`. Removing the runtime or cache directory does not remove them.
+
+### Diagnose the month total
+
+The This Month card reports degraded history without disabling timer controls:
+
+| Display | Meaning |
+| --- | --- |
+| `—` | No successful refresh exists for the current local month yet. |
+| A duration with no cue | The latest month refresh is complete. |
+| `≥` and `partial` | Toggl returned the 1,000-entry ceiling, so the value is a lower bound. |
+| `stale` | A refresh failed after a prior success; the last trusted value remains visible. |
+| `partial · stale` | The preserved lower bound is also stale. |
+
+To inspect the exact drawer projection, run this and press Ctrl+C after a line:
+
+```sh
+~/.local/bin/toggl-waybar watch | jq -c '.month'
+```
+
+An isolated month failure preserves successful Today/current reconciliation,
+so it does not produce the core `reconciliation_failed` event. If Today or the
+current timer also fails to reconcile, inspect the daemon log for that event
+and the surrounding connection state. Opening the drawer never forces a month
+request; the next eligible full reconciliation retries it without exceeding
+the one-hour attempt guard.
 
 ## Upgrade the local client
 
@@ -112,13 +142,23 @@ production quota:
 3. Open and close the drawer by right click, `Super+Shift+T`, Escape, backdrop,
    and the repeated shortcut. Confirm Stop leaves it open and a successful
    preset resume closes it.
-4. Verify the portable command follows the focused output. If output-specific
+4. While running, confirm Quick Resume remains visible but disabled. Stop the
+   timer, resume a selected row, and confirm its description and project/task
+   context were preserved.
+5. Expand Today and verify the live total, entry count, newest-first ranges,
+   durations, and running row. Close and reopen the drawer; Today should start
+   collapsed. Confirm the current timer, Today total, running row, and eligible
+   month total advance from the one local watch stream.
+6. Check This Month against Toggl for the same configured timezone. If the card
+   shows `partial` or `stale`, interpret it using the table above instead of
+   treating it as an exact fresh value.
+7. Verify the portable command follows the focused output. If output-specific
    Waybar blocks are configured, click each and confirm its hardcoded `--output`
    target receives the drawer.
-5. Suspend while a timer runs, change timer state from another Toggl client if
+8. Suspend while a timer runs, change timer state from another Toggl client if
    practical, resume, and confirm stale state is shown until reconnect and
    reconciliation restore the correct timer.
-6. Temporarily stop the daemon and confirm the failure message is actionable,
+9. Temporarily stop the daemon and confirm the failure message is actionable,
    then start it and verify the watch stream reconnects.
 
 ## Remove the integration

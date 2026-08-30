@@ -74,6 +74,7 @@ describe("drawer controller", () => {
       swayOutputs({ name: "DP-1" }, { name: "DP-2", focused: true }),
       commandResult(),
       commandResult(),
+      commandResult(),
       commandResult({ stdout: '["default","toggl-waybar-drawer"]\n' }),
       commandResult(),
     ]);
@@ -83,6 +84,10 @@ describe("drawer controller", () => {
       {
         command: "swaymsg",
         arguments: ["-t", "get_outputs", "--raw"],
+      },
+      {
+        command: "eww",
+        arguments: ewwArguments("update", "today_expanded=false"),
       },
       {
         command: "eww",
@@ -110,6 +115,7 @@ describe("drawer controller", () => {
       ),
       commandResult(),
       commandResult(),
+      commandResult(),
       commandResult({ exitCode: 1, stderr: "binding modes unavailable" }),
     ]);
 
@@ -118,16 +124,18 @@ describe("drawer controller", () => {
       command: "swaymsg",
       arguments: ["-t", "get_outputs", "--raw"],
     });
-    expect(calls[1]?.arguments).toEqual(
+    expect(calls[1]?.arguments).toEqual(ewwArguments("update", "today_expanded=false"));
+    expect(calls[2]?.arguments).toEqual(
       ewwArguments("open", "toggl-drawer", "--id", "toggl-drawer", "--screen", "1"),
     );
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
   });
 
   it("pins Eww and the compositor socket when commands originate from the drawer service", async () => {
     const { calls, dependencies } = harness(
       [
         swayOutputs({ focused: true, name: "DP-1" }),
+        commandResult(),
         commandResult(),
         commandResult(),
         commandResult({ stdout: '["default"]' }),
@@ -143,8 +151,12 @@ describe("drawer controller", () => {
       command: "swaymsg",
       arguments: ["--socket", "/run/user/1000/scroll-ipc.sock", "-t", "get_outputs", "--raw"],
     });
-    expect(calls[1]?.command).toBe("/home/test/.local/bin/eww");
-    expect(calls[3]?.arguments).toEqual([
+    expect(calls[1]).toEqual({
+      command: "/home/test/.local/bin/eww",
+      arguments: ewwArguments("update", "today_expanded=false"),
+    });
+    expect(calls[2]?.command).toBe("/home/test/.local/bin/eww");
+    expect(calls[4]?.arguments).toEqual([
       "--socket",
       "/run/user/1000/scroll-ipc.sock",
       "-t",
@@ -171,28 +183,52 @@ describe("drawer controller", () => {
       swayOutputs({ focused: true, name: "DP-1" }),
       commandResult(),
       commandResult(),
+      commandResult(),
       commandResult({ stdout: '{"default":true}' }),
     ]);
 
     expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(0);
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
     expect(errors).toEqual([]);
+  });
+
+  it("does not create a window when resetting the Today disclosure fails", async () => {
+    const { calls, dependencies, errors } = harness([
+      swayOutputs({ focused: true, name: "DP-1" }),
+      commandResult({ exitCode: 1, stderr: "state update failed" }),
+    ]);
+
+    expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(1);
+    expect(calls).toEqual([
+      {
+        command: "swaymsg",
+        arguments: ["-t", "get_outputs", "--raw"],
+      },
+      {
+        command: "eww",
+        arguments: ewwArguments("update", "today_expanded=false"),
+      },
+    ]);
+    expect(errors.join("")).toContain("Unable to reset the Today disclosure");
+    expect(errors.join("")).toContain("state update failed");
   });
 
   it("reports Eww failures and does not reveal or enter the mode after a failed open", async () => {
     const { dependencies, errors, run } = harness([
       swayOutputs({ focused: true, name: "DP-1" }),
+      commandResult(),
       commandResult({ exitCode: 1, stderr: "could not open window" }),
     ]);
 
     expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(1);
-    expect(run).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledTimes(3);
     expect(errors.join("")).toContain("could not open window");
   });
 
   it("cleans up a created overlay after reveal failure without hiding the original error", async () => {
     const { calls, dependencies, errors } = harness([
       swayOutputs({ focused: true, name: "DP-1" }),
+      commandResult(),
       commandResult(),
       commandResult({ exitCode: 1, stderr: "reveal failed" }),
       commandResult({ exitCode: 1, stderr: "cleanup close failed" }),
@@ -204,6 +240,10 @@ describe("drawer controller", () => {
       {
         command: "swaymsg",
         arguments: ["-t", "get_outputs", "--raw"],
+      },
+      {
+        command: "eww",
+        arguments: ewwArguments("update", "today_expanded=false"),
       },
       {
         command: "eww",
@@ -267,6 +307,7 @@ describe("drawer controller", () => {
             swayOutputs({ focused: true, name: "DP-3" }),
             commandResult(),
             commandResult(),
+            commandResult(),
             commandResult({ stdout: '["default"]' }),
           ];
     const { calls, dependencies } = harness(results);
@@ -276,8 +317,41 @@ describe("drawer controller", () => {
       command: "eww",
       arguments: ewwArguments("active-windows"),
     });
-    const actionCall = calls.find((call) => call.command === "eww" && call !== calls[0]);
-    expect(actionCall?.arguments).toContain(expectedAction === "close" ? "update" : "open");
+    if (expectedAction === "close") {
+      expect(calls).toEqual([
+        { command: "eww", arguments: ewwArguments("active-windows") },
+        {
+          command: "eww",
+          arguments: ewwArguments("update", "drawer_revealed=false"),
+        },
+        { command: "eww", arguments: ewwArguments("close", "toggl-drawer") },
+        { command: "swaymsg", arguments: ["mode", "default"] },
+      ]);
+    } else {
+      expect(calls).toEqual([
+        { command: "eww", arguments: ewwArguments("active-windows") },
+        {
+          command: "swaymsg",
+          arguments: ["-t", "get_outputs", "--raw"],
+        },
+        {
+          command: "eww",
+          arguments: ewwArguments("update", "today_expanded=false"),
+        },
+        {
+          command: "eww",
+          arguments: ewwArguments("open", "toggl-drawer", "--id", "toggl-drawer", "--screen", "0"),
+        },
+        {
+          command: "eww",
+          arguments: ewwArguments("update", "drawer_revealed=true"),
+        },
+        {
+          command: "swaymsg",
+          arguments: ["-t", "get_binding_modes", "--raw"],
+        },
+      ]);
+    }
   });
 
   it.each([
@@ -403,46 +477,184 @@ describe("runtime bundles", () => {
   );
 });
 
-describe("Eww source assets", () => {
-  it("gives every command button enough time to complete", async () => {
-    const source = await readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8");
-    const lines = source.split("\n");
-    const commandLines = lines
-      .map((line, index) => ({ index, line }))
-      .filter(({ line }) => line.includes(":onclick"));
+function sourceSection(source: string, startMarker: string, endMarker?: string): string {
+  const start = source.indexOf(startMarker);
+  if (start === -1) {
+    throw new Error(`Missing source marker ${startMarker}`);
+  }
+  const end = endMarker === undefined ? source.length : source.indexOf(endMarker, start + 1);
+  if (end === -1) {
+    throw new Error(`Missing source marker ${endMarker}`);
+  }
+  return source.slice(start, end);
+}
 
-    expect(commandLines).toHaveLength(4);
-    for (const { index } of commandLines) {
-      expect(
-        lines.slice(Math.max(0, index - 3), index).some((line) => line.includes(":timeout")),
-      ).toBe(true);
-    }
-    expect(source.match(/:timeout "15s"/g)).toHaveLength(3);
-    expect(source.match(/:timeout "2s"/g)).toHaveLength(1);
+describe("Eww source assets", () => {
+  it("gives every command button a timeout, including the local Today toggle", async () => {
+    const yuck = await readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8");
+    const controls = sourceSection(yuck, "(defwidget primary-controls", "(defwidget preset-row");
+    const preset = sourceSection(yuck, "(defwidget preset-row", "(defwidget quick-resume");
+    const glance = sourceSection(yuck, "(defwidget glance-and-history", "(defwidget toggl-panel");
+    const window = sourceSection(yuck, "(defwindow toggl-drawer");
+
+    expect(yuck.match(/:onclick/g)).toHaveLength(5);
+    expect(controls.match(/:timeout "15s"/g)).toHaveLength(2);
+    expect(preset).toContain(':timeout "15s"');
+    expect(glance).toContain(':timeout "2s"');
+    expect(glance).toContain(
+      `:onclick "\${EWW_CMD} update today_expanded=\${today_expanded ? false : true}"`,
+    );
+    expect(window).toContain(':timeout "2s"');
   });
 
-  it("keeps the overlay keyboard-neutral and its long text visible", async () => {
+  it("defines the fallback, first-map-safe conditional surfaces, and action-first hierarchy", async () => {
+    const yuck = await readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8");
+    const initialLiteral = yuck.match(/:initial\s+("(?:\\.|[^"\\])*")/)?.[1];
+    expect(initialLiteral).toBeDefined();
+    const initialJson = JSON.parse(initialLiteral ?? '"{}"');
+    expect(JSON.parse(initialJson)).toEqual({
+      version: 1,
+      status: "offline",
+      connection: "offline",
+      confidence: "uncertain",
+      current: null,
+      today: "00:00:00",
+      todayEntryCount: 0,
+      todayEntryCountLabel: "0 entries",
+      todayEntries: [],
+      todayEntriesOmitted: 0,
+      todayEntriesOmittedLabel: "",
+      month: { availability: "unavailable", value: "—", cue: "" },
+      pending: null,
+      error: "Toggl daemon unavailable",
+      presets: [],
+    });
+
+    const panel = sourceSection(yuck, "(defwidget toggl-panel", "(defwindow toggl-drawer");
+    const current = sourceSection(
+      yuck,
+      "(defwidget current-summary",
+      "(defwidget primary-controls",
+    );
+    const quickResume = sourceSection(
+      yuck,
+      "(defwidget quick-resume",
+      "(defwidget today-entry-row",
+    );
+    const presetRow = sourceSection(yuck, "(defwidget preset-row", "(defwidget quick-resume");
+    const glance = sourceSection(yuck, "(defwidget glance-and-history", "(defwidget toggl-panel");
+
+    expect(yuck).toContain("(defvar today_expanded false)");
+    expect(current).toContain(':reveal {jq(toggl_view, ".current != null")}');
+    expect(current).toContain(
+      ':reveal {jq(toggl_view, ".current == null and .status == \\"idle\\"")}',
+    );
+    expect(current).toContain(
+      ':reveal {jq(toggl_view, ".current == null and .status != \\"idle\\"")}',
+    );
+    expect(current).not.toContain("(stack");
+    expect(yuck).not.toContain(":visible {");
+    expect(current).toContain('"RUNNING NOW"');
+    expect(current).toContain('"TIMER IDLE"');
+    expect(current).toContain('"STATE UNAVAILABLE"');
+    expect(current).toContain('"Timer state is unavailable"');
+    expect(quickResume).toContain('"QUICK RESUME"');
+    expect(quickResume).toContain(':class "preset-list"');
+    expect(quickResume).toContain(':active {toggl_view.status == "idle"');
+    expect(presetRow).toContain(':class "play-affordance"');
+    expect(yuck).not.toContain("RECENT");
+    expect(yuck).not.toMatch(/\/\s*8\b/);
+
+    const currentIndex = panel.indexOf("(current-summary)");
+    const controlsIndex = panel.indexOf("(primary-controls)");
+    const scrollIndex = panel.indexOf("(scroll");
+    const quickResumeIndex = panel.indexOf("(quick-resume)");
+    const glanceIndex = panel.indexOf("(glance-and-history)");
+    expect([currentIndex, controlsIndex, scrollIndex, quickResumeIndex, glanceIndex]).not.toContain(
+      -1,
+    );
+    expect(currentIndex).toBeLessThan(controlsIndex);
+    expect(controlsIndex).toBeLessThan(scrollIndex);
+    expect(scrollIndex).toBeLessThan(quickResumeIndex);
+    expect(quickResumeIndex).toBeLessThan(glanceIndex);
+    expect(panel).toContain(":vscroll true");
+    expect(panel).toContain(":hscroll false");
+
+    expect(glance).toContain(':class "today-toggle"');
+    expect(glance).toContain(':text "TODAY"');
+    expect(glance).toContain("toggl_view.todayEntryCountLabel");
+    expect(glance).toContain(":reveal today_expanded");
+    expect(glance).toContain(':transition "slidedown"');
+    expect(glance).toContain(':duration "150ms"');
+    expect(glance).toContain(":reveal {toggl_view.todayEntryCount == 0}");
+    expect(glance).toContain("toggl_view.todayEntries");
+    expect(glance).toContain("toggl_view.todayEntriesOmittedLabel");
+    expect(glance).toContain(`:class "month-card \${toggl_view.month.availability}"`);
+    expect(glance).toContain("toggl_view.month.value");
+    expect(glance).toContain("toggl_view.month.cue");
+  });
+
+  it("keeps dynamic rows local and every user-provided label fully visible", async () => {
+    const yuck = await readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8");
+    const projectContext = sourceSection(
+      yuck,
+      "(defwidget project-context",
+      "(defwidget connection-status",
+    );
+    const current = sourceSection(
+      yuck,
+      "(defwidget current-summary",
+      "(defwidget primary-controls",
+    );
+    const controls = sourceSection(yuck, "(defwidget primary-controls", "(defwidget preset-row");
+    const presetRow = sourceSection(yuck, "(defwidget preset-row", "(defwidget quick-resume");
+    const todayEntryRow = sourceSection(
+      yuck,
+      "(defwidget today-entry-row",
+      "(defwidget glance-and-history",
+    );
+
+    expect(presetRow).toContain("[preset]");
+    expect(presetRow).toContain("preset.");
+    expect(todayEntryRow).toContain("[entry]");
+    expect(todayEntryRow).toContain("entry.");
+    for (const row of [presetRow, todayEntryRow]) {
+      expect(row).not.toContain("toggl_view");
+      expect(row).not.toContain("today_expanded");
+    }
+
+    expect(yuck.match(/:show-truncated false/g)).toHaveLength(
+      yuck.match(/\(label\b/g)?.length ?? 0,
+    );
+    expect(projectContext).toContain(':valign "center"');
+    expect(todayEntryRow).toContain(':class "timeline-marker"');
+    expect(todayEntryRow).toContain(':valign "start"');
+    expect(projectContext).toMatch(/:wrap true[\s\S]*:text \{context\}/);
+    expect(current).toMatch(/:wrap true[\s\S]*:text \{toggl_view\.current\?\.label/);
+    expect(controls).toMatch(/:wrap true[\s\S]*:text \{toggl_view\.error/);
+    expect(presetRow).toMatch(/:wrap true[\s\S]*:text \{preset\.label\}/);
+    expect(todayEntryRow).toMatch(/:wrap true[\s\S]*:text \{entry\.label\}/);
+  });
+
+  it("keeps the overlay portable, transparent, wide, and keyboard-neutral", async () => {
     const [yuck, scss] = await Promise.all([
       readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8"),
       readFile(join(repositoryDirectory, "eww", "eww.scss"), "utf8"),
     ]);
     const panelRule = scss.match(/\.toggl-panel\s*\{([^}]*)\}/)?.[1] ?? "";
-    const presetRow = yuck.slice(
-      yuck.indexOf("(defwidget preset-row"),
-      yuck.indexOf("(defwidget recent-presets"),
-    );
+    const placeholders = [...new Set(yuck.match(/__[A-Z][A-Z_]+__/g) ?? [])].sort();
 
     expect(yuck).toContain(":focusable false");
     expect(yuck).not.toMatch(/\{[^"\n]*(?:==|!=)\s+null/);
     expect(yuck).toContain(":width 720");
     expect(yuck).not.toContain(":limit-width");
-    expect(yuck.match(/:show-truncated false/g)).toHaveLength(
-      yuck.match(/\(label\b/g)?.length ?? 0,
-    );
-    expect(yuck.match(/:wrap true/g)).toHaveLength(7);
-    expect(presetRow).not.toContain("toggl_view");
+    expect(placeholders).toEqual([
+      "__TOGGL_WAYBAR_DRAWER_EXECUTABLE__",
+      "__TOGGL_WAYBAR_EXECUTABLE__",
+    ]);
     expect(panelRule).not.toContain("min-width");
     expect(scss).toMatch(/window\s*\{[^}]*background-color:\s*transparent;/s);
+    expect(scss).toMatch(/\.drawer-backdrop,[^{]*\{[^}]*background-color:\s*transparent;/s);
     expect(scss).not.toMatch(/font-weight:\s*(?:650|750)/);
   });
 });

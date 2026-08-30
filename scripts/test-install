@@ -213,6 +213,78 @@ if grep -R -E '__TOGGL_WAYBAR_[A-Z_]+__' \
   "$eww_config_directory/eww.yuck"; then
   fail 'drawer setup left an unresolved placeholder'
 fi
+
+initial_view=$(sed -n 's/^[[:space:]]*:initial //p' "$eww_config_directory/eww.yuck")
+[ -n "$initial_view" ] || fail 'installed Eww config has no initial drawer view'
+for initial_fragment in \
+  '\"version\":1' \
+  '\"status\":\"offline\"' \
+  '\"connection\":\"offline\"' \
+  '\"confidence\":\"uncertain\"' \
+  '\"current\":null' \
+  '\"today\":\"00:00:00\"' \
+  '\"todayEntryCount\":0' \
+  '\"todayEntryCountLabel\":\"0 entries\"' \
+  '\"todayEntries\":[]' \
+  '\"todayEntriesOmitted\":0' \
+  '\"todayEntriesOmittedLabel\":\"\"' \
+  '\"month\":{\"availability\":\"unavailable\",\"value\":\"—\",\"cue\":\"\"}' \
+  '\"pending\":null' \
+  '\"error\":\"Toggl daemon unavailable\"' \
+  '\"presets\":[]'
+do
+  printf '%s\n' "$initial_view" | grep -F "$initial_fragment" >/dev/null ||
+    fail "installed Eww initial view is missing $initial_fragment"
+done
+
+for action_first_fragment in \
+  '(defvar today_expanded false)' \
+  ':reveal {jq(toggl_view, ".current != null")}' \
+  ':reveal {jq(toggl_view, ".current == null and .status == \"idle\"")}' \
+  ':reveal {jq(toggl_view, ".current == null and .status != \"idle\"")}' \
+  ':text "STATE UNAVAILABLE"' \
+  ':text "QUICK RESUME"' \
+  ':onclick "${EWW_CMD} update today_expanded=${today_expanded ? false : true}"' \
+  ':reveal today_expanded' \
+  ':transition "slidedown"' \
+  ':vscroll true' \
+  '(for entry in {toggl_view.todayEntries}' \
+  ':reveal {toggl_view.todayEntryCount == 0}' \
+  ':text {toggl_view.todayEntryCountLabel}' \
+  ':reveal {toggl_view.todayEntriesOmitted > 0}' \
+  ':text {toggl_view.todayEntriesOmittedLabel}' \
+  ':text {toggl_view.month.value}'
+do
+  grep -F "$action_first_fragment" "$eww_config_directory/eww.yuck" >/dev/null ||
+    fail "installed Eww config is missing $action_first_fragment"
+done
+
+if grep -F 'RECENT' "$eww_config_directory/eww.yuck" >/dev/null; then
+  fail 'installed Eww config still labels Quick Resume as RECENT'
+fi
+if grep -F '/8' "$eww_config_directory/eww.yuck" >/dev/null; then
+  fail 'installed Eww config exposes the internal preset limit'
+fi
+if grep -F ':visible {' "$eww_config_directory/eww.yuck" >/dev/null; then
+  fail 'installed Eww config uses first-map-unsafe dynamic visibility'
+fi
+if grep -E '\{[^"]*(==|!=)[[:space:]]+null' "$eww_config_directory/eww.yuck" >/dev/null; then
+  fail 'installed Eww config contains a direct null comparison'
+fi
+if grep -F ':limit-width' "$eww_config_directory/eww.yuck" >/dev/null; then
+  fail 'installed Eww config contains unsupported label width limiting'
+fi
+if grep -E 'font-weight:[[:space:]]*(650|750)[[:space:]]*;' \
+  "$eww_config_directory/eww.scss" >/dev/null; then
+  fail 'installed Eww stylesheet contains an unsupported font weight'
+fi
+installed_label_count=$(grep -o '(label' "$eww_config_directory/eww.yuck" | wc -l)
+installed_untruncated_label_count=$(
+  grep -o ':show-truncated false' "$eww_config_directory/eww.yuck" | wc -l
+)
+[ "$installed_label_count" -eq "$installed_untruncated_label_count" ] ||
+  fail 'installed Eww config does not disable truncation for every label'
+
 if grep -R -F "$repository_root" \
   "$binary_directory" \
   "$config_root/toggl-waybar-live" \

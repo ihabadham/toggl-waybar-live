@@ -205,6 +205,12 @@ config. `Super+T` toggles the timer, `Super+Shift+T` toggles the drawer, and the
 sample `toggl-waybar-drawer` mode lets Escape close it. Reload Sway after merging
 the fragment; do not restart the compositor.
 
+Each open resets Today to its compact total-and-entry-count view; select Today
+to reveal or hide the newest-first timeline. Quick Resume stays visible but is
+disabled while a timer runs. Stop keeps the drawer open so another activity can
+be selected, while Resume Last or a selected Quick Resume row closes it after a
+successful start.
+
 The portable Waybar and keyboard commands open the drawer on the currently
 focused workspace output. Waybar does not provide a generic click command with
 the clicked output name. Exact click-output placement therefore requires a

@@ -22,8 +22,12 @@ commands in [operations](docs/operations.md).
 
 Left-clicking the example Waybar module or pressing `Super+T` toggles the timer.
 Right-clicking or pressing `Super+Shift+T` opens an optional right-edge Eww
-drawer. Eww is not required for the core daemon, renderer, or CLI and is never
-given the Toggl token.
+drawer. The action-first drawer keeps Stop or Resume Last prominent, offers up
+to eight Quick Resume activities, and shows Today and This Month at a glance.
+Today's time entries expand in place when needed. Running values advance from
+one local watch stream without making per-second network requests. Eww is not
+required for the core daemon, renderer, or CLI and is never given the Toggl
+token.
 
 Cloudflare Workers Builds can connect the deployed Worker to the repository and
 run `npm run deploy` automatically whenever protected `main` changes. Runtime

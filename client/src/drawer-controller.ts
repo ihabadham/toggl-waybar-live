@@ -216,6 +216,19 @@ export async function runDrawerController(
       return 1;
     }
 
+    try {
+      const reset = await eww("update", "today_expanded=false");
+      if (reset.exitCode !== 0) {
+        writeError(`Unable to reset the Today disclosure: ${failureMessage("eww", reset)}\n`);
+        return 1;
+      }
+    } catch (error) {
+      writeError(
+        `Unable to reset the Today disclosure: ${error instanceof Error ? error.message : "eww failed"}\n`,
+      );
+      return 1;
+    }
+
     const opened = await eww("open", drawerName, "--id", drawerName, "--screen", screen);
     if (opened.exitCode !== 0) {
       writeError(`Unable to open the Toggl drawer: ${failureMessage("eww", opened)}\n`);
