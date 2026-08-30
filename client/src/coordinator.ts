@@ -6,7 +6,21 @@ import type {
   ControlRequest,
   ControlSnapshot,
 } from "./control-protocol.js";
+import {
+  boundedControlSnapshot,
+  type ControlSnapshotBase,
+  chronologicalTodayEntries,
+} from "./control-snapshot.js";
 import { type DayWindow, dayWindowAt } from "./day-window.js";
+import {
+  advanceMonth,
+  applyMonthEntry,
+  applyMonthRelayMessage,
+  completedMonthSeconds,
+  createMonthState,
+  type MonthState,
+} from "./month-state.js";
+import { instantBelongsToMonth, type MonthWindow, monthWindowAt } from "./month-window.js";
 import {
   activityFromPreset,
   mergePresets,
@@ -59,6 +73,7 @@ export interface CoordinatorApi {
 export interface ClientCoordinatorOptions {
   api: CoordinatorApi | TogglApi;
   initialConfidence?: Confidence;
+  initialMonthState?: MonthState;
   initialPresets?: readonly ResumePreset[];
   initialState?: ClientState;
   log?: (event: string, error?: unknown) => void;
@@ -148,6 +163,7 @@ export class ClientCoordinator {
   private confidence: Confidence;
   private error: ControlErrorCode | null = null;
   private lastToggleArrival: number | null = null;
+  private monthState: MonthState;
   private mutationActive = false;
   private mutationEpoch = 0;
   private mutationTail: Promise<void> = Promise.resolve();
@@ -171,6 +187,7 @@ export class ClientCoordinator {
     this.presets = mergePresets(options.initialPresets ?? []);
     const now = this.now();
     this.state = options.initialState ?? createState(this.window(now).dayKey);
+    this.monthState = options.initialMonthState ?? createMonthState(this.monthWindow(now));
   }
 
   snapshot(): ControlSnapshot {
@@ -179,7 +196,8 @@ export class ClientCoordinator {
 
   private snapshotAt(generatedAt: string): ControlSnapshot {
     const current = this.state.current;
-    return {
+    const monthWindow = this.monthWindow(generatedAt);
+    const base: ControlSnapshotBase = {
       version: 1,
       type: "snapshot",
       status:
@@ -195,16 +213,31 @@ export class ClientCoordinator {
               workspaceId: current.workspaceId,
               description: current.description,
               projectId: current.projectId,
+              projectColor: current.projectColor,
               projectName: current.projectName,
               start: current.start,
+              taskName: current.taskName,
             },
+      timezone: this.options.timezone,
       completedTodaySeconds: completedSeconds(this.state.entries),
       currentContributesToToday: this.state.currentContributesToToday,
+      month: {
+        availability: this.monthState.availability,
+        partial: this.monthState.partial,
+        key: this.monthState.monthKey,
+        completedSeconds: completedMonthSeconds(this.monthState),
+        currentContributes:
+          current !== null &&
+          this.monthState.monthKey === monthWindow.monthKey &&
+          instantBelongsToMonth(current.start, monthWindow),
+        synchronizedAt: this.monthState.synchronizedAt,
+      },
       presets: [...this.presets],
       generatedAt,
       lastSynchronizedAt: this.state.lastSynchronizedAt,
       error: this.error,
     };
+    return boundedControlSnapshot(base, chronologicalTodayEntries(this.state));
   }
 
   rendererState(): RendererState {
@@ -268,8 +301,14 @@ export class ClientCoordinator {
     });
   }
 
+  advanceCalendar(): void {
+    const now = this.now();
+    this.monthState = advanceMonth(this.monthState, this.monthWindow(now));
+    this.commit(advanceClientDay(this.state, this.window(now)));
+  }
+
   advanceDay(): void {
-    this.commit(advanceClientDay(this.state, this.window(this.now())));
+    this.advanceCalendar();
   }
 
   applyRelay(message: RelayMessage): void {
@@ -434,6 +473,10 @@ export class ClientCoordinator {
     return dayWindowAt(now, this.options.timezone);
   }
 
+  private monthWindow(now: string | Date): MonthWindow {
+    return monthWindowAt(now, this.options.timezone);
+  }
+
   private stale(revision: number, epoch: number, relayGeneration: number): boolean {
     return (
       this.commandActive ||
@@ -470,6 +513,11 @@ export class ClientCoordinator {
   }
 
   private commitRelayMessage(message: RelayMessage, window: DayWindow): void {
+    this.monthState = applyMonthRelayMessage(
+      this.monthState,
+      message,
+      this.monthWindow(this.now()),
+    );
     const next = applyRelayMessage(this.state, message, window);
     const confidence =
       this.ambiguousCreateUnresolved || this.relayConflictUnresolved ? "uncertain" : "confirmed";
@@ -726,6 +774,11 @@ export class ClientCoordinator {
     this.recordQuota(stopped);
     const window = this.window(this.now());
     if (stopped.ok) {
+      this.monthState = applyMonthEntry(
+        this.monthState,
+        stopped.data,
+        this.monthWindow(this.now()),
+      );
       const next = setPending(applyRichStopResult(this.state, stopped.data, window), null);
       this.confirmStoppedEntry(target.id, next);
       this.commit(next, {
@@ -826,6 +879,11 @@ export class ClientCoordinator {
       const conflictingCurrent = currentId !== null && currentId !== created.data.id;
       const next = setPending(applyRichCreateResult(this.state, created.data, window), null);
       if (next.current?.id === created.data.id) {
+        this.monthState = applyMonthEntry(
+          this.monthState,
+          created.data,
+          this.monthWindow(this.now()),
+        );
         this.confirmLocalCurrent(next, created.data);
       }
       this.commit(next, {

@@ -8,11 +8,11 @@ import {
   type ControlSnapshot,
   commandResultSchema,
   controlSnapshotSchema,
+  maximumControlFrameBytes,
 } from "./control-protocol.js";
 import { commandResponseTimeoutMilliseconds } from "./control-timing.js";
 import { runtimePaths } from "./runtime-path.js";
 
-const maximumFrameBytes = 64 * 1_024;
 const maximumReconnectDelayMilliseconds = 5_000;
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
@@ -51,8 +51,20 @@ function unavailableSnapshot(now: Date): ControlSnapshot {
     confidence: "uncertain",
     pending: null,
     current: null,
+    timezone: null,
     completedTodaySeconds: 0,
     currentContributesToToday: false,
+    todayEntries: [],
+    todayEntryCount: 0,
+    todayEntriesOmitted: 0,
+    month: {
+      availability: "unavailable",
+      partial: false,
+      key: null,
+      completedSeconds: 0,
+      currentContributes: false,
+      synchronizedAt: null,
+    },
     presets: [],
     generatedAt: now.toISOString(),
     lastSynchronizedAt: null,
@@ -101,7 +113,7 @@ export function sendControlCommand(
       socket.write(`${JSON.stringify(request)}\n`, "utf8");
     });
     socket.on("data", (chunk: Buffer) => {
-      if (buffer.length + chunk.length > maximumFrameBytes) {
+      if (buffer.length + chunk.length > maximumControlFrameBytes) {
         finish(new ControlClientError("The Toggl daemon sent an oversized response"));
         return;
       }
@@ -203,7 +215,7 @@ export function watchControlSnapshots(
         const end = newline === -1 ? chunk.length : newline;
         const terminatorBytes = newline === -1 ? 0 : 1;
         const segmentLength = end - offset;
-        if (buffer.length + segmentLength + terminatorBytes > maximumFrameBytes) {
+        if (buffer.length + segmentLength + terminatorBytes > maximumControlFrameBytes) {
           disconnect();
           return;
         }

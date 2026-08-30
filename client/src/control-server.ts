@@ -10,11 +10,11 @@ import {
   type ControlRequest,
   type ControlSnapshot,
   commandResultSchema,
+  controlFrameBytes,
   controlRequestSchema,
   controlSnapshotSchema,
+  maximumControlFrameBytes,
 } from "./control-protocol.js";
-
-const maximumFrameBytes = 64 * 1_024;
 
 export interface ControlProvider {
   handle(request: ControlRequest): Promise<CommandResult | ControlSnapshot>;
@@ -105,7 +105,7 @@ async function prepareSocketPath(path: string): Promise<void> {
 
 function writeFrame(socket: Socket, value: unknown): boolean {
   const frame = `${JSON.stringify(value)}\n`;
-  return Buffer.byteLength(frame, "utf8") <= maximumFrameBytes && socket.write(frame, "utf8");
+  return controlFrameBytes(value) <= maximumControlFrameBytes && socket.write(frame, "utf8");
 }
 
 function serveConnection(socket: Socket, provider: ControlProvider): () => void {
@@ -159,7 +159,7 @@ function serveConnection(socket: Socket, provider: ControlProvider): () => void 
   };
 
   socket.on("data", (chunk: Buffer) => {
-    if (accepted || buffer.length + chunk.length > maximumFrameBytes) {
+    if (accepted || buffer.length + chunk.length > maximumControlFrameBytes) {
       reject();
       return;
     }

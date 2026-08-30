@@ -37,8 +37,20 @@ function snapshot(): ControlSnapshot {
     confidence: "confirmed",
     pending: null,
     current: null,
+    timezone: "Africa/Cairo",
     completedTodaySeconds: 60,
     currentContributesToToday: false,
+    todayEntries: [],
+    todayEntryCount: 0,
+    todayEntriesOmitted: 0,
+    month: {
+      availability: "ready",
+      partial: false,
+      key: "2026-08",
+      completedSeconds: 60,
+      currentContributes: false,
+      synchronizedAt: "2026-08-27T11:00:00Z",
+    },
     presets: [],
     generatedAt: "2026-08-27T11:00:00Z",
     lastSynchronizedAt: "2026-08-27T11:00:00Z",
@@ -197,6 +209,13 @@ describe("control client", () => {
 
     await vi.waitFor(() => expect(received).toHaveLength(1));
     expect(received[0]?.error).toBe("daemon_unavailable");
+    expect(received[0]).toMatchObject({
+      timezone: null,
+      todayEntries: [],
+      todayEntryCount: 0,
+      todayEntriesOmitted: 0,
+      month: { availability: "unavailable", key: null },
+    });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(received).toHaveLength(1);
 

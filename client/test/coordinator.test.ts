@@ -178,6 +178,53 @@ function coordinator(
 }
 
 describe("client coordinator", () => {
+  it("projects timezone, Today history, and locally observed month totals", async () => {
+    const original = entry({
+      id: "700",
+      description: "Implement drawer",
+      start: "2026-08-27T11:30:00Z",
+      taskName: "Controls",
+    });
+    const stopped = entry({
+      ...original,
+      stop: "2026-08-27T12:00:00Z",
+      durationSeconds: 1_800,
+    });
+    const instance = coordinator(api({ stopTimeEntry: vi.fn(async () => success(stopped)) }), {
+      initialCurrent: original,
+    });
+
+    await expect(instance.stop()).resolves.toMatchObject({ outcome: "stopped" });
+
+    expect(instance.snapshot()).toMatchObject({
+      timezone: "Africa/Cairo",
+      completedTodaySeconds: 1_800,
+      todayEntries: [
+        {
+          id: "700",
+          description: "Implement drawer",
+          projectId: "404",
+          projectName: "Internal",
+          projectColor: "#c9806b",
+          taskName: "Controls",
+          start: "2026-08-27T11:30:00Z",
+          stop: "2026-08-27T12:00:00Z",
+          durationSeconds: 1_800,
+        },
+      ],
+      todayEntryCount: 1,
+      todayEntriesOmitted: 0,
+      month: {
+        availability: "unavailable",
+        partial: false,
+        key: "2026-08",
+        completedSeconds: 1_800,
+        currentContributes: false,
+        synchronizedAt: null,
+      },
+    });
+  });
+
   it("marks disconnected relay state unconfirmed until REST or relay confirms it", () => {
     const instance = coordinator(api());
     instance.setConnection("stale");
@@ -1047,9 +1094,20 @@ describe("client coordinator", () => {
     created.resolve(success(running));
 
     await expect(command).resolves.toMatchObject({ outcome: "resumed" });
-    expect(instance.snapshot().current).toBeNull();
+    expect(instance.snapshot()).toMatchObject({
+      current: null,
+      month: { completedSeconds: 1 },
+    });
+    instance.applyRelay(changed(running));
+    expect(instance.snapshot()).toMatchObject({
+      current: null,
+      month: { completedSeconds: 1 },
+    });
     instance.applyRelay(runningSnapshot(running));
-    expect(instance.snapshot().current).toBeNull();
+    expect(instance.snapshot()).toMatchObject({
+      current: null,
+      month: { completedSeconds: 1 },
+    });
   });
 
   it("makes webhook echoes idempotent and rejects late resurrection after local stop", async () => {
