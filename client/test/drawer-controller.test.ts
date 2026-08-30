@@ -24,6 +24,18 @@ function commandResult(overrides: Partial<DrawerCommandResult> = {}): DrawerComm
   return { exitCode: 0, stdout: "", stderr: "", ...overrides };
 }
 
+function ewwArguments(...arguments_: string[]): string[] {
+  return ["--force-wayland", "--config", configDirectory, "--no-daemonize", ...arguments_];
+}
+
+function swayOutputs(
+  ...outputs: Array<{ active?: boolean; focused?: boolean; name: string }>
+): DrawerCommandResult {
+  return commandResult({
+    stdout: JSON.stringify(outputs.map((output) => ({ active: true, focused: false, ...output }))),
+  });
+}
+
 function harness(
   results: readonly DrawerCommandResult[],
   overrides: Partial<DrawerControllerDependencies> = {},
@@ -43,9 +55,11 @@ function harness(
     calls,
     dependencies: {
       configDirectory,
+      ewwExecutable: "eww",
       revealDurationMilliseconds: 180,
       run,
       sleep: vi.fn(async () => undefined),
+      swaySocket: null,
       writeError: (value: string) => errors.push(value),
       ...overrides,
     } satisfies DrawerControllerDependencies,
@@ -57,6 +71,7 @@ function harness(
 describe("drawer controller", () => {
   it("opens the fixed window on an explicitly selected output and enters an available mode", async () => {
     const { calls, dependencies, errors } = harness([
+      swayOutputs({ name: "DP-1" }, { name: "DP-2", focused: true }),
       commandResult(),
       commandResult(),
       commandResult({ stdout: '["default","toggl-waybar-drawer"]\n' }),
@@ -66,21 +81,16 @@ describe("drawer controller", () => {
     expect(await runDrawerController(["open", "--output", "DP-2"], dependencies)).toBe(0);
     expect(calls).toEqual([
       {
-        command: "eww",
-        arguments: [
-          "--config",
-          configDirectory,
-          "open",
-          "toggl-drawer",
-          "--id",
-          "toggl-drawer",
-          "--screen",
-          "DP-2",
-        ],
+        command: "swaymsg",
+        arguments: ["-t", "get_outputs", "--raw"],
       },
       {
         command: "eww",
-        arguments: ["--config", configDirectory, "update", "drawer_revealed=true"],
+        arguments: ewwArguments("open", "toggl-drawer", "--id", "toggl-drawer", "--screen", "1"),
+      },
+      {
+        command: "eww",
+        arguments: ewwArguments("update", "drawer_revealed=true"),
       },
       {
         command: "swaymsg",
@@ -91,14 +101,13 @@ describe("drawer controller", () => {
     expect(errors).toEqual([]);
   });
 
-  it("opens on the focused workspace output without guessing a monitor index", async () => {
+  it("maps the focused active output to Eww's numeric Wayland monitor order", async () => {
     const { calls, dependencies } = harness([
-      commandResult({
-        stdout: JSON.stringify([
-          { name: "1", focused: false, output: "DP-1" },
-          { name: "2", focused: true, output: "HDMI-A-1" },
-        ]),
-      }),
+      swayOutputs(
+        { active: false, name: "DISABLED-1" },
+        { name: "DP-1" },
+        { focused: true, name: "HDMI-A-1" },
+      ),
       commandResult(),
       commandResult(),
       commandResult({ exitCode: 1, stderr: "binding modes unavailable" }),
@@ -107,58 +116,83 @@ describe("drawer controller", () => {
     expect(await runDrawerController(["open"], dependencies)).toBe(0);
     expect(calls[0]).toEqual({
       command: "swaymsg",
-      arguments: ["-t", "get_workspaces", "--raw"],
+      arguments: ["-t", "get_outputs", "--raw"],
     });
-    expect(calls[1]?.arguments).toEqual([
-      "--config",
-      configDirectory,
-      "open",
-      "toggl-drawer",
-      "--id",
-      "toggl-drawer",
-      "--screen",
-      "HDMI-A-1",
-    ]);
+    expect(calls[1]?.arguments).toEqual(
+      ewwArguments("open", "toggl-drawer", "--id", "toggl-drawer", "--screen", "1"),
+    );
     expect(calls).toHaveLength(4);
+  });
+
+  it("pins Eww and the compositor socket when commands originate from the drawer service", async () => {
+    const { calls, dependencies } = harness(
+      [
+        swayOutputs({ focused: true, name: "DP-1" }),
+        commandResult(),
+        commandResult(),
+        commandResult({ stdout: '["default"]' }),
+      ],
+      {
+        ewwExecutable: "/home/test/.local/bin/eww",
+        swaySocket: "/run/user/1000/scroll-ipc.sock",
+      },
+    );
+
+    expect(await runDrawerController(["open"], dependencies)).toBe(0);
+    expect(calls[0]).toEqual({
+      command: "swaymsg",
+      arguments: ["--socket", "/run/user/1000/scroll-ipc.sock", "-t", "get_outputs", "--raw"],
+    });
+    expect(calls[1]?.command).toBe("/home/test/.local/bin/eww");
+    expect(calls[3]?.arguments).toEqual([
+      "--socket",
+      "/run/user/1000/scroll-ipc.sock",
+      "-t",
+      "get_binding_modes",
+      "--raw",
+    ]);
   });
 
   it.each([
     ["not JSON"],
-    [JSON.stringify({ focused: true, output: "DP-1" })],
-    [JSON.stringify([{ focused: true, output: "" }])],
-    [JSON.stringify([{ focused: false, output: "DP-1" }])],
-  ])("rejects malformed focused workspace output %j", async (stdout) => {
+    [JSON.stringify({ active: true, focused: true, name: "DP-1" })],
+    [JSON.stringify([{ active: true, focused: true, name: "" }])],
+    [JSON.stringify([{ active: true, focused: false, name: "DP-1" }])],
+  ])("rejects malformed focused output data %j", async (stdout) => {
     const { dependencies, errors, run } = harness([commandResult({ stdout })]);
 
     expect(await runDrawerController(["open"], dependencies)).toBe(1);
     expect(run).toHaveBeenCalledOnce();
-    expect(errors.join("")).toContain("focused Sway workspace output");
+    expect(errors.join("")).toContain("focused Sway output");
   });
 
   it("does not let optional mode discovery fail an otherwise successful open", async () => {
     const { calls, dependencies, errors } = harness([
+      swayOutputs({ focused: true, name: "DP-1" }),
       commandResult(),
       commandResult(),
       commandResult({ stdout: '{"default":true}' }),
     ]);
 
     expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(0);
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(4);
     expect(errors).toEqual([]);
   });
 
   it("reports Eww failures and does not reveal or enter the mode after a failed open", async () => {
     const { dependencies, errors, run } = harness([
+      swayOutputs({ focused: true, name: "DP-1" }),
       commandResult({ exitCode: 1, stderr: "could not open window" }),
     ]);
 
     expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(1);
-    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(2);
     expect(errors.join("")).toContain("could not open window");
   });
 
   it("cleans up a created overlay after reveal failure without hiding the original error", async () => {
     const { calls, dependencies, errors } = harness([
+      swayOutputs({ focused: true, name: "DP-1" }),
       commandResult(),
       commandResult({ exitCode: 1, stderr: "reveal failed" }),
       commandResult({ exitCode: 1, stderr: "cleanup close failed" }),
@@ -168,25 +202,20 @@ describe("drawer controller", () => {
     expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(1);
     expect(calls).toEqual([
       {
-        command: "eww",
-        arguments: [
-          "--config",
-          configDirectory,
-          "open",
-          "toggl-drawer",
-          "--id",
-          "toggl-drawer",
-          "--screen",
-          "DP-1",
-        ],
+        command: "swaymsg",
+        arguments: ["-t", "get_outputs", "--raw"],
       },
       {
         command: "eww",
-        arguments: ["--config", configDirectory, "update", "drawer_revealed=true"],
+        arguments: ewwArguments("open", "toggl-drawer", "--id", "toggl-drawer", "--screen", "0"),
       },
       {
         command: "eww",
-        arguments: ["--config", configDirectory, "close", "toggl-drawer"],
+        arguments: ewwArguments("update", "drawer_revealed=true"),
+      },
+      {
+        command: "eww",
+        arguments: ewwArguments("close", "toggl-drawer"),
       },
       { command: "swaymsg", arguments: ["mode", "default"] },
     ]);
@@ -213,11 +242,11 @@ describe("drawer controller", () => {
     expect(calls).toEqual([
       {
         command: "eww",
-        arguments: ["--config", configDirectory, "update", "drawer_revealed=false"],
+        arguments: ewwArguments("update", "drawer_revealed=false"),
       },
       {
         command: "eww",
-        arguments: ["--config", configDirectory, "close", "toggl-drawer"],
+        arguments: ewwArguments("close", "toggl-drawer"),
       },
       { command: "swaymsg", arguments: ["mode", "default"] },
     ]);
@@ -235,6 +264,7 @@ describe("drawer controller", () => {
         ? [commandResult({ stdout }), commandResult(), commandResult(), commandResult()]
         : [
             commandResult({ stdout }),
+            swayOutputs({ focused: true, name: "DP-3" }),
             commandResult(),
             commandResult(),
             commandResult({ stdout: '["default"]' }),
@@ -244,9 +274,10 @@ describe("drawer controller", () => {
     expect(await runDrawerController(["toggle", "--output", "DP-3"], dependencies)).toBe(0);
     expect(calls[0]).toEqual({
       command: "eww",
-      arguments: ["--config", configDirectory, "active-windows"],
+      arguments: ewwArguments("active-windows"),
     });
-    expect(calls[1]?.arguments[2]).toBe(expectedAction === "close" ? "update" : "open");
+    const actionCall = calls.find((call) => call.command === "eww" && call !== calls[0]);
+    expect(actionCall?.arguments).toContain(expectedAction === "close" ? "update" : "open");
   });
 
   it.each([
@@ -390,18 +421,29 @@ describe("Eww source assets", () => {
     expect(source.match(/:timeout "2s"/g)).toHaveLength(1);
   });
 
-  it("keeps the overlay keyboard-neutral and its transparent panel exactly 360px wide", async () => {
+  it("keeps the overlay keyboard-neutral and its long text visible", async () => {
     const [yuck, scss] = await Promise.all([
       readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8"),
       readFile(join(repositoryDirectory, "eww", "eww.scss"), "utf8"),
     ]);
     const panelRule = scss.match(/\.toggl-panel\s*\{([^}]*)\}/)?.[1] ?? "";
+    const presetRow = yuck.slice(
+      yuck.indexOf("(defwidget preset-row"),
+      yuck.indexOf("(defwidget recent-presets"),
+    );
 
-    expect(yuck).toContain(':focusable "none"');
-    expect(yuck).not.toContain(":focusable true");
-    expect(yuck).toContain(":width 360");
+    expect(yuck).toContain(":focusable false");
+    expect(yuck).not.toMatch(/\{[^"\n]*(?:==|!=)\s+null/);
+    expect(yuck).toContain(":width 720");
+    expect(yuck).not.toContain(":limit-width");
+    expect(yuck.match(/:show-truncated false/g)).toHaveLength(
+      yuck.match(/\(label\b/g)?.length ?? 0,
+    );
+    expect(yuck.match(/:wrap true/g)).toHaveLength(7);
+    expect(presetRow).not.toContain("toggl_view");
     expect(panelRule).not.toContain("min-width");
     expect(scss).toMatch(/window\s*\{[^}]*background-color:\s*transparent;/s);
+    expect(scss).not.toMatch(/font-weight:\s*(?:650|750)/);
   });
 });
 

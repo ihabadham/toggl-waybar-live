@@ -185,10 +185,20 @@ above, then run:
 
 The command requires an already-installed core `toggl-waybar` CLI and an `eww`
 executable. It atomically installs the drawer bundle, its dedicated Eww config,
-and `toggl-waybar-drawer`. It never invokes a package manager or changes Sway or
-Waybar files. The config lives under
+`toggl-waybar-drawer`, and the `toggl-waybar-drawer.service` systemd user unit.
+The unit keeps Eww in the foreground with the Wayland backend and belongs to the
+graphical session. The installer never invokes a package manager, reloads or
+starts systemd, or changes Sway or Waybar files. The config lives under
 `${XDG_CONFIG_HOME:-$HOME/.config}/toggl-waybar-live/eww/`. Rerun the command
 after upgrading the checkout whenever drawer code or Eww assets change.
+
+Enable the optional service after installation:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now toggl-waybar-drawer.service
+systemctl --user status toggl-waybar-drawer.service
+```
 
 Copy the relevant bindings from `examples/sway.conf` into the active Sway
 config. `Super+T` toggles the timer, `Super+Shift+T` toggles the drawer, and the

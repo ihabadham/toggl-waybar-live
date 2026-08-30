@@ -7,6 +7,14 @@ systemctl --user status toggl-waybar-live.service
 journalctl --user -u toggl-waybar-live.service -f
 ```
 
+If the optional drawer is installed, its Eww daemon has a separate service and
+log stream:
+
+```sh
+systemctl --user status toggl-waybar-drawer.service
+journalctl --user -u toggl-waybar-drawer.service -f
+```
+
 Daemon logs are one-line JSON with event, severity, and timestamp fields. They
 do not contain tokens, authorization headers, entry descriptions, or config
 values.
@@ -61,11 +69,13 @@ npm install
 ./scripts/configure-drawer  # optional; requires Eww
 systemctl --user daemon-reload
 systemctl --user restart toggl-waybar-live.service
+systemctl --user restart toggl-waybar-drawer.service  # if installed
 ```
 
-Neither installer enables nor restarts the service. The installed launchers
-refer to stable XDG copies, so switching or deleting source worktrees does not
-change the running version until an installer is rerun.
+Neither installer enables, starts, or restarts a service. The installed
+launchers refer to stable XDG copies and pin Node's executable path; the drawer
+unit likewise pins Eww's executable path. Switching or deleting source
+worktrees does not change the running version until an installer is rerun.
 
 ## Roll back the local client
 
@@ -130,8 +140,10 @@ Remove `custom/toggl` from Waybar and restore any module it replaced. Finally:
 
 ```sh
 ~/.local/bin/toggl-waybar-drawer close 2>/dev/null || true
+systemctl --user disable --now toggl-waybar-drawer.service 2>/dev/null || true
 systemctl --user disable --now toggl-waybar-live.service
 rm ~/.config/systemd/user/toggl-waybar-live.service
+rm ~/.config/systemd/user/toggl-waybar-drawer.service 2>/dev/null || true
 rm -rf ~/.config/toggl-waybar-live
 rm -rf ~/.local/share/toggl-waybar-live
 rm -rf ~/.local/state/toggl-waybar-live

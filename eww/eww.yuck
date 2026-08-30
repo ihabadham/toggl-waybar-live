@@ -11,6 +11,7 @@
   (label
     :class "connection ${toggl_view.connection}"
     :halign "end"
+    :show-truncated false
     :text "●  ${toggl_view.connection}"))
 
 (defwidget timer-summary []
@@ -21,34 +22,41 @@
     (box
       :class "section-heading"
       :space-evenly false
-      (label :halign "start" :hexpand true :text "TODAY")
-      (label :class "today-total" :halign "end" :text toggl_view.today))
+      (label :halign "start" :hexpand true :show-truncated false :text "TODAY")
+      (label :class "today-total" :halign "end" :show-truncated false :text {toggl_view.today}))
     (box
       :class "current-entry"
       :orientation "vertical"
       :space-evenly false
-      :visible {toggl_view.current != null}
+      :visible {jq(toggl_view, ".current != null")}
       (label
         :class "current-label"
-        :halign "start"
-        :limit-width 34
-        :show-truncated true
+        :halign "fill"
+        :hexpand true
+        :justify "left"
+        :show-truncated false
+        :wrap true
+        :xalign 0
         :text {toggl_view.current?.label ?: "Running"})
-      (box :class "current-meta" :space-evenly false
+      (box :class "current-meta" :hexpand true :space-evenly false
         (label
-          :halign "start"
+          :halign "fill"
           :hexpand true
-          :limit-width 24
-          :show-truncated true
+          :justify "left"
+          :show-truncated false
+          :wrap true
+          :xalign 0
           :text {toggl_view.current?.project ?: ""})
         (label
           :class "current-elapsed"
           :halign "end"
+          :show-truncated false
           :text {toggl_view.current?.elapsed ?: "00:00:00"})))
     (label
       :class "idle-copy"
       :halign "start"
-      :visible {toggl_view.current == null}
+      :show-truncated false
+      :visible {jq(toggl_view, ".current == null")}
       :text "No timer is running")))
 
 (defwidget primary-controls []
@@ -58,65 +66,79 @@
     :space-evenly false
     (button
       :class "stop-button"
-      :active {toggl_view.status == "running" && toggl_view.confidence == "confirmed" && toggl_view.pending == null}
+      :active {toggl_view.status == "running" && toggl_view.confidence == "confirmed" && jq(toggl_view, ".pending == null")}
       :visible {toggl_view.status == "running"}
       :timeout "15s"
       :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" stop"
-      (label :text "Stop timer"))
+      (label :show-truncated false :text "Stop timer"))
     (button
       :class "resume-button"
-      :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && toggl_view.pending == null && arraylength(toggl_view.presets) > 0}
+      :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && jq(toggl_view, ".pending == null") && arraylength(toggl_view.presets) > 0}
       :visible {toggl_view.status != "running"}
       :timeout "15s"
       :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" resume && \"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
-      (label :text "Resume last"))
+      (label :show-truncated false :text "Resume last"))
     (label
       :class "pending-message"
       :halign "start"
-      :visible {toggl_view.pending != null}
+      :show-truncated false
+      :visible {jq(toggl_view, ".pending != null")}
       :text {toggl_view.pending ?: ""})
     (label
       :class "error-message"
       :halign "start"
+      :show-truncated false
       :wrap true
-      :visible {toggl_view.error != null}
+      :visible {jq(toggl_view, ".error != null")}
       :text {toggl_view.error ?: ""})))
 
 (defwidget preset-row [preset]
   (button
     :class "preset-row"
-    :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && toggl_view.pending == null}
+    :hexpand true
     :timeout "15s"
     :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" resume ${preset.id} && \"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
     (box
+      :hexpand true
       :orientation "vertical"
       :space-evenly false
       (label
         :class "preset-label"
-        :halign "start"
-        :limit-width 34
-        :show-truncated true
-        :text preset.label)
+        :halign "fill"
+        :hexpand true
+        :justify "left"
+        :show-truncated false
+        :wrap true
+        :xalign 0
+        :text {preset.label})
       (box :class "preset-meta" :space-evenly false
         (label
-          :halign "start"
+          :halign "fill"
           :hexpand true
-          :limit-width 26
-          :show-truncated true
+          :justify "left"
+          :show-truncated false
+          :wrap true
+          :xalign 0
           :text {preset.project != "" ? preset.project : preset.task})
-        (label :class "billable" :visible preset.billable :text "billable"))
+        (label :class "billable" :show-truncated false :visible {preset.billable} :text "billable"))
       (label
         :class "preset-task"
-        :halign "start"
-        :limit-width 34
-        :show-truncated true
+        :halign "fill"
+        :hexpand true
+        :justify "left"
+        :show-truncated false
+        :wrap true
+        :xalign 0
         :visible {preset.task != "" && preset.task != preset.project}
-        :text preset.task)
+        :text {preset.task})
       (label
         :class "preset-tags"
-        :halign "start"
-        :limit-width 34
-        :show-truncated true
+        :halign "fill"
+        :hexpand true
+        :justify "left"
+        :show-truncated false
+        :wrap true
+        :xalign 0
         :visible {arraylength(preset.tags) > 0}
         :text {jq(preset.tags, "join(\" · \")")}))))
 
@@ -126,27 +148,32 @@
     :orientation "vertical"
     :space-evenly false
     (box :class "section-heading" :space-evenly false
-      (label :halign "start" :hexpand true :text "RECENT")
-      (label :class "preset-count" :halign "end" :text "${arraylength(toggl_view.presets)}/8"))
+      (label :halign "start" :hexpand true :show-truncated false :text "RECENT")
+      (label :class "preset-count" :halign "end" :show-truncated false :text "${arraylength(toggl_view.presets)}/8"))
     (label
       :class "empty-presets"
       :halign "start"
+      :show-truncated false
       :visible {arraylength(toggl_view.presets) == 0}
       :text "Recent activities appear after Toggl syncs.")
-    (for preset in toggl_view.presets
-      (preset-row :preset preset))))
+    (box
+      :orientation "vertical"
+      :space-evenly false
+      :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && jq(toggl_view, ".pending == null")}
+      (for preset in {toggl_view.presets}
+        (preset-row :preset preset)))))
 
 (defwidget toggl-panel []
   (box
     :class "toggl-panel"
     :orientation "vertical"
     :space-evenly false
-    :width 360
+    :width 720
     :vexpand true
     (box :class "panel-heading" :space-evenly false
       (box :orientation "vertical" :space-evenly false :hexpand true
-        (label :class "eyebrow" :halign "start" :text "TOGGL TRACK")
-        (label :class "panel-title" :halign "start" :text "Time drawer"))
+        (label :class "eyebrow" :halign "start" :show-truncated false :text "TOGGL TRACK")
+        (label :class "panel-title" :halign "start" :show-truncated false :text "Time drawer"))
       (connection-status))
     (timer-summary)
     (primary-controls)
@@ -161,7 +188,7 @@
     :anchor "top right")
   :stacking "overlay"
   :exclusive false
-  :focusable "none"
+  :focusable false
   (box
     :class "toggl-overlay"
     :orientation "horizontal"
@@ -172,7 +199,7 @@
       :vexpand true
       :timeout "2s"
       :onclick "\"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
-      (label :text ""))
+      (label :show-truncated false :text ""))
     (revealer
       :reveal drawer_revealed
       :transition "slideleft"

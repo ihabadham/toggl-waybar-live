@@ -14,7 +14,7 @@ if ! command -v eww >/dev/null 2>&1; then
   exit 1
 fi
 
-node_binary=$(command -v node)
+node_binary=$(node -p 'process.execPath')
 case "$node_binary" in
   /*) ;;
   *)
@@ -22,12 +22,35 @@ case "$node_binary" in
     exit 1
     ;;
 esac
+if [ ! -x "$node_binary" ]; then
+  printf 'Node executable is not executable: %s\n' "$node_binary" >&2
+  exit 1
+fi
+
+eww_command=$(command -v eww)
+eww_binary=$(node -e '
+  const { realpathSync } = require("node:fs");
+  process.stdout.write(realpathSync(process.argv[1]));
+' "$eww_command")
+case "$eww_binary" in
+  /*) ;;
+  *)
+    printf 'Eww must resolve to an absolute executable path.\n' >&2
+    exit 1
+    ;;
+esac
+if [ ! -x "$eww_binary" ]; then
+  printf 'Eww executable is not executable: %s\n' "$eww_binary" >&2
+  exit 1
+fi
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(dirname -- "$script_directory")
 config_root=${XDG_CONFIG_HOME:-"$HOME/.config"}
 config_directory=$config_root/toggl-waybar-live
 eww_config_directory=$config_directory/eww
+unit_directory=$config_root/systemd/user
+unit_file=$unit_directory/toggl-waybar-drawer.service
 data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}
 data_directory=$data_root/toggl-waybar-live
 client_directory=$data_directory/client
@@ -40,8 +63,8 @@ if ! node -e '
   if (!process.argv.slice(1).every((value) => value.startsWith("/") && safePath.test(value))) {
     process.exit(1);
   }
-' "$config_root" "$data_root" "$binary_directory"; then
-  printf 'Configuration, data, and binary paths must be absolute and use safe path characters.\n' >&2
+' "$config_root" "$data_root" "$binary_directory" "$node_binary" "$eww_binary"; then
+  printf 'Configuration, data, binary, Node, and Eww paths must be absolute and use safe path characters.\n' >&2
   exit 1
 fi
 
@@ -96,6 +119,7 @@ refuse_symlink "$config_directory"
 refuse_symlink "$eww_config_directory"
 refuse_symlink "$data_directory"
 refuse_symlink "$client_directory"
+refuse_symlink "$unit_file"
 refuse_symlink "$core_cli"
 refuse_symlink "$drawer_wrapper"
 refuse_symlink "$client_directory/drawer-controller.mjs"
@@ -107,7 +131,7 @@ if [ ! -f "$core_cli" ] || [ ! -x "$core_cli" ]; then
   exit 1
 fi
 
-mkdir -p "$config_root" "$data_root" "$binary_directory"
+mkdir -p "$config_root" "$unit_directory" "$data_root" "$binary_directory"
 ensure_owned_directory "$config_directory"
 ensure_owned_directory "$eww_config_directory"
 ensure_owned_directory "$data_directory"
@@ -123,13 +147,15 @@ eww_scss_temporary=$(stage_copy \
   "$repository_root/eww/eww.scss" \
   "$eww_config_directory/eww.scss" 0644)
 drawer_wrapper_temporary=$(mktemp "$binary_directory/.toggl-waybar-drawer.XXXXXX")
+unit_temporary=$(mktemp "$unit_directory/.toggl-waybar-drawer.service.XXXXXX")
 
 cleanup() {
   rm -f \
     "${drawer_bundle_temporary:-}" \
     "${eww_yuck_temporary:-}" \
     "${eww_scss_temporary:-}" \
-    "${drawer_wrapper_temporary:-}"
+    "${drawer_wrapper_temporary:-}" \
+    "${unit_temporary:-}"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -180,11 +206,29 @@ node -e '
 
 {
   printf '%s\n' '#!/bin/sh'
-  printf 'exec %s %s "$@"\n' \
+  printf 'TOGGL_WAYBAR_EWW_EXECUTABLE=%s exec %s %s "$@"\n' \
+    "$(shell_quote "$eww_binary")" \
     "$(shell_quote "$node_binary")" \
     "$(shell_quote "$client_directory/drawer-controller.mjs")"
 } >"$drawer_wrapper_temporary"
 chmod 0755 "$drawer_wrapper_temporary"
+
+{
+  printf '%s\n' '[Unit]'
+  printf '%s\n' 'Description=Toggl drawer for Waybar'
+  printf '%s\n' 'After=graphical-session.target'
+  printf '%s\n\n' 'PartOf=graphical-session.target'
+  printf '%s\n' '[Service]'
+  printf '%s\n' 'Type=simple'
+  printf '%s\n' 'Environment=GDK_BACKEND=wayland'
+  printf 'ExecStart=%s --force-wayland --config %s --no-daemonize daemon\n' \
+    "$eww_binary" "$eww_config_directory"
+  printf '%s\n' 'Restart=on-failure'
+  printf '%s\n\n' 'RestartSec=5s'
+  printf '%s\n' '[Install]'
+  printf '%s\n' 'WantedBy=graphical-session.target'
+} >"$unit_temporary"
+chmod 0644 "$unit_temporary"
 
 replace_file "$drawer_bundle_temporary" "$client_directory/drawer-controller.mjs"
 drawer_bundle_temporary=
@@ -194,7 +238,9 @@ replace_file "$eww_scss_temporary" "$eww_config_directory/eww.scss"
 eww_scss_temporary=
 replace_file "$drawer_wrapper_temporary" "$drawer_wrapper"
 drawer_wrapper_temporary=
+replace_file "$unit_temporary" "$unit_file"
+unit_temporary=
 trap - EXIT HUP INT TERM
 
-printf 'Installed the optional Toggl drawer bundle, Eww config, and launcher.\n'
+printf 'Installed the optional Toggl drawer bundle, Eww config, launcher, and user service.\n'
 printf 'No Sway or Waybar configuration was changed.\n'

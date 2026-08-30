@@ -14,6 +14,7 @@ state_root=$temporary_root/state
 runtime_root=$temporary_root/runtime
 binary_directory=$temporary_root/bin
 fake_binary_directory=$temporary_root/fake-bin
+stable_binary_directory=$temporary_root/stable-bin
 other_directory=$temporary_root/other-cwd
 mkdir -p \
   "$test_home" \
@@ -23,6 +24,7 @@ mkdir -p \
   "$runtime_root" \
   "$binary_directory" \
   "$fake_binary_directory" \
+  "$stable_binary_directory" \
   "$other_directory"
 
 fail() {
@@ -41,6 +43,12 @@ for command_name in node openssl mktemp sed dirname mkdir rm chmod mv cp; do
   command_path=$(command -v "$command_name")
   ln -s "$command_path" "$fake_binary_directory/$command_name"
 done
+stable_node_binary=$("$fake_binary_directory/node" -p 'process.execPath')
+case "$stable_node_binary" in
+  /*) ;;
+  *) fail 'Node process.execPath was not absolute' ;;
+esac
+[ -x "$stable_node_binary" ] || fail 'Node process.execPath was not executable'
 env_binary=$(command -v env)
 sleep_binary=$(command -v sleep)
 timeout_binary=$(command -v timeout)
@@ -89,6 +97,11 @@ done
 for command_name in toggl-waybar-daemon toggl-waybar-render toggl-waybar; do
   [ -x "$binary_directory/$command_name" ] || fail "missing installed command $command_name"
   assert_mode "$binary_directory/$command_name" 755
+  grep -F "exec '$stable_node_binary' " "$binary_directory/$command_name" >/dev/null ||
+    fail "$command_name does not pin Node process.execPath"
+  if grep -F "$fake_binary_directory/node" "$binary_directory/$command_name" >/dev/null; then
+    fail "$command_name persisted the temporary PATH shim for Node"
+  fi
 done
 assert_mode "$environment_file" 600
 assert_mode "$unit_file" 644
@@ -99,6 +112,8 @@ assert_mode "$client_directory" 700
 [ ! -e "$client_directory/drawer-controller.mjs" ] || fail 'core setup installed the drawer bundle'
 [ ! -e "$config_root/toggl-waybar-live/eww" ] || fail 'core setup installed Eww configuration'
 [ ! -e "$binary_directory/toggl-waybar-drawer" ] || fail 'core setup installed the drawer command'
+[ ! -e "$config_root/systemd/user/toggl-waybar-drawer.service" ] ||
+  fail 'core setup installed the drawer service'
 
 mkdir -p "$config_root/waybar" "$config_root/sway"
 printf '%s\n' 'waybar-sentinel' >"$config_root/waybar/config"
@@ -125,16 +140,19 @@ fi
 grep -F 'Eww is required' "$temporary_root/drawer-missing.err" >/dev/null ||
   fail 'missing-Eww failure was not actionable'
 [ ! -e "$client_directory/drawer-controller.mjs" ] || fail 'failed drawer setup installed a bundle'
+[ ! -e "$config_root/systemd/user/toggl-waybar-drawer.service" ] ||
+  fail 'failed drawer setup installed a service'
 
 drawer_command_log=$temporary_root/eww.log
 printf '%s\n' \
   '#!/bin/sh' \
   '[ -z "${EWW_LOG:-}" ] || printf "%s\\n" "$*" >>"$EWW_LOG"' \
-  'exit 0' >"$fake_binary_directory/eww"
+  'exit 0' >"$stable_binary_directory/eww"
+ln -s "$stable_binary_directory/eww" "$fake_binary_directory/eww"
 printf '%s\n' \
   '#!/bin/sh' \
   'case " $* " in' \
-  '  *" get_workspaces "*) printf "[{\"focused\":true,\"output\":\"DP-1\"}]\n" ;;' \
+  '  *" get_outputs "*) printf "[{\"active\":true,\"focused\":true,\"name\":\"DP-1\"}]\n" ;;' \
   '  *" get_binding_modes "*) printf "[]\n" ;;' \
   'esac' \
   'exit 0' >"$fake_binary_directory/swaymsg"
@@ -149,15 +167,37 @@ PATH="$fake_binary_directory" \
 "$repository_root/scripts/configure-drawer" >"$temporary_root/drawer.out"
 
 eww_config_directory=$config_root/toggl-waybar-live/eww
+drawer_unit_file=$config_root/systemd/user/toggl-waybar-drawer.service
 [ -f "$client_directory/drawer-controller.mjs" ] || fail 'drawer bundle was not installed'
 [ -f "$eww_config_directory/eww.yuck" ] || fail 'Eww yuck config was not installed'
 [ -f "$eww_config_directory/eww.scss" ] || fail 'Eww stylesheet was not installed'
 [ -x "$binary_directory/toggl-waybar-drawer" ] || fail 'drawer command was not installed'
+[ -f "$drawer_unit_file" ] || fail 'drawer user service was not installed'
 assert_mode "$client_directory/drawer-controller.mjs" 644
 assert_mode "$eww_config_directory/eww.yuck" 644
 assert_mode "$eww_config_directory/eww.scss" 644
 assert_mode "$binary_directory/toggl-waybar-drawer" 755
+assert_mode "$drawer_unit_file" 644
 assert_mode "$eww_config_directory" 700
+grep -F "exec '$stable_node_binary' " "$binary_directory/toggl-waybar-drawer" >/dev/null ||
+  fail 'drawer command does not pin Node process.execPath'
+grep -F "TOGGL_WAYBAR_EWW_EXECUTABLE='$stable_binary_directory/eww' " \
+  "$binary_directory/toggl-waybar-drawer" >/dev/null ||
+  fail 'drawer command does not pin the Eww executable'
+if grep -F "$fake_binary_directory/node" "$binary_directory/toggl-waybar-drawer" >/dev/null; then
+  fail 'drawer command persisted the temporary PATH shim for Node'
+fi
+grep -F 'PartOf=graphical-session.target' "$drawer_unit_file" >/dev/null ||
+  fail 'drawer service is not owned by the graphical session'
+grep -F 'Environment=GDK_BACKEND=wayland' "$drawer_unit_file" >/dev/null ||
+  fail 'drawer service does not force the Wayland GDK backend'
+grep -F "ExecStart=$stable_binary_directory/eww --force-wayland --config $eww_config_directory --no-daemonize daemon" \
+  "$drawer_unit_file" >/dev/null ||
+  fail 'drawer service does not pin the foreground Eww command and installed config'
+grep -F 'Restart=on-failure' "$drawer_unit_file" >/dev/null ||
+  fail 'drawer service does not restart after failures'
+grep -F 'WantedBy=graphical-session.target' "$drawer_unit_file" >/dev/null ||
+  fail 'drawer service cannot be enabled for the graphical session'
 [ "$(sed -n '1p' "$config_root/waybar/config")" = 'waybar-sentinel' ] ||
   fail 'drawer setup changed Waybar configuration'
 [ "$(sed -n '1p' "$config_root/sway/config")" = 'sway-sentinel' ] ||
@@ -177,6 +217,7 @@ if grep -R -F "$repository_root" \
   "$binary_directory" \
   "$config_root/toggl-waybar-live" \
   "$unit_file" \
+  "$drawer_unit_file" \
   "$client_directory" >/dev/null; then
   fail 'installed drawer files contain the repository path'
 fi
@@ -185,13 +226,15 @@ drawer_checksums_before=$(cksum \
   "$client_directory/drawer-controller.mjs" \
   "$eww_config_directory/eww.yuck" \
   "$eww_config_directory/eww.scss" \
-  "$binary_directory/toggl-waybar-drawer")
+  "$binary_directory/toggl-waybar-drawer" \
+  "$drawer_unit_file")
 run_core_configure 'third-api-token' >"$temporary_root/core-with-drawer.out"
 drawer_checksums_after=$(cksum \
   "$client_directory/drawer-controller.mjs" \
   "$eww_config_directory/eww.yuck" \
   "$eww_config_directory/eww.scss" \
-  "$binary_directory/toggl-waybar-drawer")
+  "$binary_directory/toggl-waybar-drawer" \
+  "$drawer_unit_file")
 [ "$drawer_checksums_before" = "$drawer_checksums_after" ] ||
   fail 'core setup changed installed drawer files'
 

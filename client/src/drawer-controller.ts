@@ -24,9 +24,11 @@ export interface DrawerCommandResult {
 
 export interface DrawerControllerDependencies {
   configDirectory?: string;
+  ewwExecutable?: string;
   revealDurationMilliseconds?: number;
   run?: (command: string, arguments_: readonly string[]) => Promise<DrawerCommandResult>;
   sleep?: (milliseconds: number) => Promise<void>;
+  swaySocket?: string | null;
   writeError?: (value: string) => void;
 }
 
@@ -81,8 +83,12 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function nonEmpty(value: string | undefined): string | null {
+  return value === undefined || value.trim().length === 0 ? null : value;
+}
+
 function ewwArguments(configDirectory: string, ...arguments_: string[]): string[] {
-  return ["--config", configDirectory, ...arguments_];
+  return ["--force-wayland", "--config", configDirectory, "--no-daemonize", ...arguments_];
 }
 
 function failureMessage(command: string, result: DrawerCommandResult): string {
@@ -90,22 +96,29 @@ function failureMessage(command: string, result: DrawerCommandResult): string {
   return detail.length > 0 ? detail : `${command} exited with status ${result.exitCode}`;
 }
 
-function focusedOutput(stdout: string): string | null {
+function ewwScreenIndex(stdout: string, requestedOutput: string | null): string | null {
   try {
-    const workspaces: unknown = JSON.parse(stdout);
-    if (!Array.isArray(workspaces)) {
+    const outputs: unknown = JSON.parse(stdout);
+    if (!Array.isArray(outputs)) {
       return null;
     }
-    const focused = workspaces.find(
-      (workspace): workspace is { focused: true; output: unknown } =>
-        typeof workspace === "object" &&
-        workspace !== null &&
-        "focused" in workspace &&
-        workspace.focused === true,
+    const activeOutputs = outputs.filter(
+      (output): output is { active: true; focused: boolean; name: string } =>
+        typeof output === "object" &&
+        output !== null &&
+        "active" in output &&
+        output.active === true &&
+        "focused" in output &&
+        typeof output.focused === "boolean" &&
+        "name" in output &&
+        typeof output.name === "string" &&
+        output.name.trim().length > 0,
     );
-    return typeof focused?.output === "string" && focused.output.trim().length > 0
-      ? focused.output
-      : null;
+    const index =
+      requestedOutput === null
+        ? activeOutputs.findIndex((output) => output.focused)
+        : activeOutputs.findIndex((output) => output.name === requestedOutput);
+    return index === -1 ? null : String(index);
   } catch {
     return null;
   }
@@ -140,12 +153,22 @@ export async function runDrawerController(
   }
 
   const configDirectory = dependencies.configDirectory ?? defaultConfigDirectory;
+  const ewwExecutable =
+    dependencies.ewwExecutable ?? nonEmpty(process.env.TOGGL_WAYBAR_EWW_EXECUTABLE) ?? "eww";
   const revealDurationMilliseconds =
     dependencies.revealDurationMilliseconds ?? defaultRevealDurationMilliseconds;
   const run = dependencies.run ?? runCommand;
   const sleep = dependencies.sleep ?? delay;
+  const swaySocket =
+    dependencies.swaySocket === undefined
+      ? (nonEmpty(process.env.SWAYSOCK) ??
+        nonEmpty(process.env.I3SOCK) ??
+        nonEmpty(process.env.SCROLLSOCK))
+      : dependencies.swaySocket;
   const eww = (...ewwArguments_: string[]) =>
-    run("eww", ewwArguments(configDirectory, ...ewwArguments_));
+    run(ewwExecutable, ewwArguments(configDirectory, ...ewwArguments_));
+  const sway = (...arguments_: string[]) =>
+    run("swaymsg", swaySocket === null ? arguments_ : ["--socket", swaySocket, ...arguments_]);
 
   const cleanupFailedOpen = async (originalFailure: string): Promise<number> => {
     const failures = [originalFailure];
@@ -162,7 +185,7 @@ export async function runDrawerController(
       );
     }
     try {
-      const restored = await run("swaymsg", ["mode", "default"]);
+      const restored = await sway("mode", "default");
       if (restored.exitCode !== 0) {
         failures.push(
           `Unable to restore the default Sway mode: ${failureMessage("swaymsg", restored)}`,
@@ -178,23 +201,22 @@ export async function runDrawerController(
   };
 
   const open = async (): Promise<number> => {
-    let output = parsed.output;
-    if (output === null) {
-      const result = await run("swaymsg", ["-t", "get_workspaces", "--raw"]);
-      if (result.exitCode !== 0) {
-        writeError(
-          `Unable to determine the focused Sway workspace output: ${failureMessage("swaymsg", result)}\n`,
-        );
-        return 1;
-      }
-      output = focusedOutput(result.stdout);
-      if (output === null) {
-        writeError("Unable to determine the focused Sway workspace output from Sway IPC.\n");
-        return 1;
-      }
+    const outputs = await sway("-t", "get_outputs", "--raw");
+    if (outputs.exitCode !== 0) {
+      writeError(`Unable to inspect active Sway outputs: ${failureMessage("swaymsg", outputs)}\n`);
+      return 1;
+    }
+    const screen = ewwScreenIndex(outputs.stdout, parsed.output);
+    if (screen === null) {
+      writeError(
+        parsed.output === null
+          ? "Unable to map the focused Sway output to Eww's monitor order.\n"
+          : `Unable to map active Sway output ${JSON.stringify(parsed.output)} to Eww's monitor order.\n`,
+      );
+      return 1;
     }
 
-    const opened = await eww("open", drawerName, "--id", drawerName, "--screen", output);
+    const opened = await eww("open", drawerName, "--id", drawerName, "--screen", screen);
     if (opened.exitCode !== 0) {
       writeError(`Unable to open the Toggl drawer: ${failureMessage("eww", opened)}\n`);
       return 1;
@@ -213,9 +235,9 @@ export async function runDrawerController(
     }
 
     try {
-      const modes = await run("swaymsg", ["-t", "get_binding_modes", "--raw"]);
+      const modes = await sway("-t", "get_binding_modes", "--raw");
       if (modes.exitCode === 0 && hasDrawerMode(modes.stdout)) {
-        await run("swaymsg", ["mode", drawerMode]);
+        await sway("mode", drawerMode);
       }
     } catch {
       // Opening the drawer does not depend on the optional Escape binding mode.
@@ -249,7 +271,7 @@ export async function runDrawerController(
     }
 
     try {
-      const restored = await run("swaymsg", ["mode", "default"]);
+      const restored = await sway("mode", "default");
       if (restored.exitCode !== 0) {
         failures.push(
           `Unable to restore the default Sway mode: ${failureMessage("swaymsg", restored)}`,

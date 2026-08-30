@@ -229,6 +229,13 @@ async function main(): Promise<void> {
   process.exitCode = await runControlCli(process.argv.slice(2));
 }
 
+function handleStandardOutputError(error: NodeJS.ErrnoException): never {
+  if (error.code === "EPIPE") {
+    process.exit(0);
+  }
+  throw error;
+}
+
 function isMainModule(): boolean {
   try {
     return Boolean(
@@ -241,5 +248,6 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
+  process.stdout.on("error", handleStandardOutputError);
   await main();
 }
