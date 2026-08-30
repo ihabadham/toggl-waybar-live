@@ -42,7 +42,7 @@ function snapshot(overrides: Partial<ControlSnapshot> = {}): ControlSnapshot {
       id: "101",
       workspaceId: "202",
       description: "Review",
-      projectId: null,
+      projectId: "303",
       projectColor: "#c9806b",
       projectName: "Internal",
       start: "2026-08-27T10:00:00Z",
@@ -51,8 +51,20 @@ function snapshot(overrides: Partial<ControlSnapshot> = {}): ControlSnapshot {
     timezone: "Africa/Cairo",
     completedTodaySeconds: 3_600,
     currentContributesToToday: true,
-    todayEntries: [],
-    todayEntryCount: 0,
+    todayEntries: [
+      {
+        id: "101",
+        description: "Review",
+        projectId: "303",
+        projectName: "Internal",
+        projectColor: "#c9806b",
+        taskName: "PR review",
+        start: "2026-08-27T10:00:00Z",
+        stop: null,
+        durationSeconds: null,
+      },
+    ],
+    todayEntryCount: 1,
     todayEntriesOmitted: 0,
     month: {
       availability: "ready",
@@ -204,77 +216,99 @@ describe("control CLI", () => {
     expect(stdout).toEqual([]);
   });
 
-  it("writes watch NDJSON immediately and ticks locally once per second", async () => {
+  it("projects every live duration from one watch subscription without sending commands", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-27T11:00:00Z"));
-    let finish: (() => void) | undefined;
-    const done = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    const { dependencies, stdout, stderr } = outputDependencies({
-      watch: (emit) => {
+    try {
+      vi.setSystemTime(new Date("2026-08-27T10:59:59Z"));
+      let finish: (() => void) | undefined;
+      const done = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const watch = vi.fn((emit: (value: ControlSnapshot) => void) => {
         emit(snapshot());
         return { done, stop: () => finish?.() };
-      },
-    });
+      });
+      const send = vi.fn(async (_request: unknown) => result());
+      const { dependencies, stdout, stderr } = outputDependencies({ send, watch });
 
-    const running = runControlCli(["watch"], dependencies);
-    expect(stdout).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(stdout).toHaveLength(2);
-    expect(JSON.parse(stdout[0] ?? "").current.elapsed).toBe("01:00:00");
-    expect(JSON.parse(stdout[1] ?? "").current.elapsed).toBe("01:00:01");
-    finish?.();
-    await expect(running).resolves.toBe(0);
-    expect(stderr).toEqual([]);
-    vi.useRealTimers();
+      const running = runControlCli(["watch"], dependencies);
+      expect(stdout).toHaveLength(1);
+      expect(JSON.parse(stdout[0] ?? "")).toMatchObject({
+        current: { elapsed: "00:59:59" },
+        today: "01:59:59",
+        todayEntries: [{ id: "101", duration: "00:59:59", running: true }],
+        month: { value: "2h 59m" },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(stdout).toHaveLength(2);
+      expect(JSON.parse(stdout[1] ?? "")).toMatchObject({
+        current: { elapsed: "01:00:00" },
+        today: "02:00:00",
+        todayEntries: [{ id: "101", duration: "01:00:00", running: true }],
+        month: { value: "3h 00m" },
+      });
+      expect(watch).toHaveBeenCalledOnce();
+      expect(send).not.toHaveBeenCalled();
+      finish?.();
+      await expect(running).resolves.toBe(0);
+      expect(stderr).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("coalesces watch snapshots and ticks while stdout is backpressured", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-27T11:00:00Z"));
-    let finish: (() => void) | undefined;
-    let emit: ((value: ControlSnapshot) => void) | undefined;
-    let drain: (() => void) | undefined;
-    const done = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    const writes: string[] = [];
-    const output = {
-      write: vi.fn((value: string) => {
-        writes.push(value);
-        return writes.length > 1;
-      }),
-      once: vi.fn((_event: "drain", listener: () => void) => {
-        drain = listener;
-      }),
-    };
-    const { dependencies } = outputDependencies({
-      output,
-      watch: (listener) => {
-        emit = listener;
-        listener(snapshot());
-        return { done, stop: () => finish?.() };
-      },
-    });
+    try {
+      vi.setSystemTime(new Date("2026-08-27T11:00:00Z"));
+      let finish: (() => void) | undefined;
+      let emit: ((value: ControlSnapshot) => void) | undefined;
+      let drain: (() => void) | undefined;
+      const done = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const writes: string[] = [];
+      const output = {
+        write: vi.fn((value: string) => {
+          writes.push(value);
+          return writes.length > 1;
+        }),
+        once: vi.fn((_event: "drain", listener: () => void) => {
+          drain = listener;
+        }),
+      };
+      const { dependencies } = outputDependencies({
+        output,
+        watch: (listener) => {
+          emit = listener;
+          listener(snapshot());
+          return { done, stop: () => finish?.() };
+        },
+      });
 
-    const running = runControlCli(["watch"], dependencies);
-    expect(writes).toHaveLength(1);
-    for (let index = 0; index < 100; index += 1) {
-      emit?.(snapshot({ completedTodaySeconds: index }));
+      const running = runControlCli(["watch"], dependencies);
+      expect(writes).toHaveLength(1);
+      for (let index = 0; index < 100; index += 1) {
+        emit?.(snapshot({ completedTodaySeconds: index }));
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(writes).toHaveLength(1);
+      expect(output.once).toHaveBeenCalledOnce();
+
+      drain?.();
+      expect(writes).toHaveLength(2);
+      expect(JSON.parse(writes[1] ?? "")).toMatchObject({
+        current: { elapsed: "01:00:10" },
+        today: "01:01:49",
+        todayEntries: [{ id: "101", duration: "01:00:10", running: true }],
+        month: { value: "3h 00m" },
+      });
+      finish?.();
+      await expect(running).resolves.toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(writes).toHaveLength(1);
-    expect(output.once).toHaveBeenCalledOnce();
-
-    drain?.();
-    expect(writes).toHaveLength(2);
-    expect(JSON.parse(writes[1] ?? "")).toMatchObject({
-      current: { elapsed: "01:00:10" },
-      today: "01:01:49",
-    });
-    finish?.();
-    await expect(running).resolves.toBe(0);
-    vi.useRealTimers();
   });
 });
