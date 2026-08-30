@@ -1,6 +1,6 @@
 # Action-first drawer enrichment
 
-Status: proposed for implementation; visual direction approved
+Status: approved for implementation
 
 ## Context
 
@@ -104,7 +104,7 @@ row, including repeated descriptions, matching Toggl's chronological model.
 Each row shows:
 
 - description;
-- project name and color when known;
+- project name and color, plus task name when known;
 - local `start – stop`, or `start – Now` for the running entry; and
 - that entry's duration.
 
@@ -139,12 +139,16 @@ Resume.
 
 The daemon already owns today's entry map. The local control protocol and its
 unavailable fallback snapshot add a strict `todayEntries` projection,
-`todayEntryCount`, and `todayEntriesOmitted`. A row contains only the fields the
-view needs:
+`todayEntryCount`, `todayEntriesOmitted`, and the configured IANA `timezone`.
+The watch client formats calendar labels and time ranges in that timezone; it
+does not infer the daemon's configuration from the desktop process
+environment. The daemon-unavailable fallback may use a null timezone because
+it carries no rows to format. A row contains only the fields the view needs:
 
 - entry ID;
 - description;
 - nullable project ID, name, and color;
+- nullable task name;
 - start timestamp;
 - nullable stop timestamp; and
 - nullable completed duration.
@@ -156,8 +160,14 @@ for the live aggregate total.
 Project color is client-local presentation metadata. Rich REST responses may
 populate it; narrow relay changes preserve already-known metadata and use a
 null fallback for unseen entries. The hosted relay protocol remains unchanged.
-Resume preset identity does not include project color because color changes do
-not create a different resumable activity.
+Resume presets retain project color as optional display metadata, but preset
+identity does not include it because color changes do not create a different
+resumable activity. Existing colorless preset files load with a null fallback.
+
+The current-entry projection likewise carries nullable project color and task
+name so the fixed current card and chronological running row use the same
+visual vocabulary. Relay-only entries fall back to null until a rich REST
+response supplies that presentation metadata.
 
 ### Month state
 
@@ -168,7 +178,13 @@ It exposes only a compact month projection through the control snapshot:
 - whether the current running entry contributes to this month;
 - month key;
 - synchronization timestamp; and
-- availability: `ready`, `stale`, `partial`, or `unavailable`.
+- freshness: `ready`, `stale`, or `unavailable`; and
+- whether the source response was partial.
+
+Freshness and completeness are intentionally independent. For example, a
+previously partial result may later become stale after a failed refresh while
+remaining a lower bound. The drawer keeps the `≥` treatment in that combined
+state instead of losing either fact.
 
 The drawer never receives the full month history. This keeps the local protocol
 small and makes the month feature explicitly subordinate to controls.
@@ -183,6 +199,12 @@ month start and next-month start. This choice:
 - needs no additional local configuration;
 - includes running entries; and
 - reuses the existing API token, parser, quota accounting, and timezone model.
+
+Entries belong to the month when their start instant falls inside those local
+bounds, matching the history endpoint's window semantics and the existing
+Today reducer. A time entry that spans a month boundary is therefore attributed
+to the month in which it started; this first version does not split entries at
+calendar boundaries.
 
 The endpoint's 1,000-entry response ceiling is treated explicitly. A response
 at the ceiling cannot be assumed complete; the state becomes `partial` and the
@@ -205,6 +227,10 @@ Month reconciliation becomes due:
 - after a meaningful relay gap, reconnect, or resume from suspend; and
 - at most once per hour as a quiet correctness backstop.
 
+Rollover and connection edges mark the month refresh as due but do not bypass
+the one-hour attempt guard. This preserves the quota ceiling even when a month
+changes shortly after the preceding refresh.
+
 Opening the drawer does not synchronously fetch month data. It immediately
 shows the latest memory state. Webhook create/update/delete events and successful
 local Stop/Resume results update both Today and month maps between REST
@@ -216,10 +242,11 @@ current, and optional month reads are serialized and paced according to
 Toggl's safe request guidance rather than issued concurrently. User-triggered
 writes keep priority over background information refreshes. The existing
 ten-minute full and alternating five-minute disconnected-current schedule
-therefore remains intact. Its worst-case background budget rises from 18 to at
-most 19 requests per hour: twelve Today/current full reads, six disconnected
-current reads, and one month read. This retains an eleven-request reserve below
-the documented 30-request user quota before user-triggered writes.
+therefore remains intact. Its worst-case scheduled-maintenance budget rises
+from 18 to at most 19 requests per hour: twelve Today/current full reads, six
+disconnected current reads, and one month read. This retains an eleven-request
+reserve below the documented 30-request user quota for user-triggered writes
+and event-driven confirmation reads.
 
 ## Failure behavior
 
