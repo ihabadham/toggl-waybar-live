@@ -16,6 +16,11 @@ import {
   type ControlServerController,
   startControlServer,
 } from "../src/control-server.js";
+import {
+  commandResponseTimeoutMilliseconds,
+  maximumInteractiveTogglRequests,
+  togglRequestDeadlineMilliseconds,
+} from "../src/control-timing.js";
 
 const directories: string[] = [];
 const controlServers: ControlServerController[] = [];
@@ -80,6 +85,12 @@ afterEach(async () => {
 });
 
 describe("control client", () => {
+  it("allows more time than one worst-case interactive operation", () => {
+    expect(commandResponseTimeoutMilliseconds).toBeGreaterThan(
+      togglRequestDeadlineMilliseconds * maximumInteractiveTogglRequests,
+    );
+  });
+
   it("sends a one-shot command and fails promptly when the daemon is absent", async () => {
     const path = await socketPath();
     const server = await startControlServer({ path, provider: provider() });

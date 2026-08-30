@@ -198,6 +198,26 @@ describe("client state", () => {
     expect(state.entries.size).toBe(0);
   });
 
+  it("tombstones a deleted current entry", () => {
+    const running = entry();
+    let state = applyRelayMessage(createState(window.dayKey), runningSnapshot(running), window);
+    state = applyRelayMessage(
+      state,
+      {
+        version: 1,
+        type: "entry.changed",
+        change: {
+          action: "deleted",
+          entry: { id: running.id, workspaceId: running.workspaceId, userId: running.userId },
+        },
+      },
+      window,
+    );
+
+    expect(state.current).toBeNull();
+    expect(state.stoppedEntryIds.has(running.id)).toBe(true);
+  });
+
   it("keeps a pre-midnight current entry visible without adding it to today's total", () => {
     const beforeMidnight = entry({ start: "2026-08-26T20:30:00Z" });
     let state = setConnection(createState(window.dayKey), "connected");

@@ -79,5 +79,8 @@ describe("drawer view", () => {
         }),
       ),
     ).toMatchObject({ current: null, error: "Toggl daemon unavailable" });
+    expect(drawerView(snapshot({ error: "command_busy" }))).toMatchObject({
+      error: "Another Toggl command is still running",
+    });
   });
 });

@@ -63,6 +63,14 @@ describe("local control protocol", () => {
         error: "ambiguous_create",
       }),
     ).toMatchObject({ outcome: "failed", error: "ambiguous_create" });
+    expect(
+      commandResultSchema.parse({
+        version: 1,
+        type: "result",
+        outcome: "failed",
+        error: "command_busy",
+      }),
+    ).toMatchObject({ outcome: "failed", error: "command_busy" });
     expect(() =>
       commandResultSchema.parse({
         version: 1,

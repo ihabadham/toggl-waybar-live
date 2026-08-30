@@ -12,12 +12,19 @@ export class QuotaGate {
   private lastCurrentAttempt: number | null = null;
   private lastFullAttempt: number | null = null;
 
-  nextAction(now: number, relayConnected: boolean): ReconciliationAction {
+  allowsRequest(now: number): boolean {
     if (this.blockedUntil !== null) {
       if (now < this.blockedUntil) {
-        return "none";
+        return false;
       }
       this.blockedUntil = null;
+    }
+    return true;
+  }
+
+  nextAction(now: number, relayConnected: boolean): ReconciliationAction {
+    if (!this.allowsRequest(now)) {
+      return "none";
     }
 
     if (this.lastFullAttempt === null || now - this.lastFullAttempt >= fullIntervalMilliseconds) {

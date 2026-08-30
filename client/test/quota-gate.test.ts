@@ -46,7 +46,9 @@ describe("quota gate", () => {
     const gate = new QuotaGate();
     gate.record(success(6, 120), 0);
 
+    expect(gate.allowsRequest(119_999)).toBe(false);
     expect(gate.nextAction(119_999, false)).toBe("none");
+    expect(gate.allowsRequest(120_000)).toBe(true);
     expect(gate.nextAction(120_000, false)).toBe("full");
   });
 

@@ -32,6 +32,7 @@ const errorCopy: Record<ControlErrorCode, string> = {
   state_unconfirmed: "Timer state could not be confirmed",
   ambiguous_create: "Timer may have started; waiting for confirmation",
   preset_not_found: "That recent activity is no longer available",
+  command_busy: "Another Toggl command is still running",
   request_failed: "Toggl request failed",
 };
 

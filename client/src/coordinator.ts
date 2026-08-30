@@ -38,6 +38,16 @@ const toggleSuppressionMilliseconds = 800;
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;
 type Confidence = "confirmed" | "uncertain";
 type ReconciliationKind = "current" | "full";
+type RelayChangeMessage = Extract<RelayMessage, { type: "entry.changed" }>;
+type RelaySnapshotMessage = Extract<RelayMessage, { type: "snapshot" }>;
+
+interface RelayCursor {
+  eventCreatedAt: string;
+  eventId: string;
+}
+
+type CoordinatorQuotaGate = Pick<QuotaGate, "record"> &
+  Partial<Pick<QuotaGate, "allowsRequest" | "recordAttempt">>;
 
 export interface CoordinatorApi {
   createRunningEntry(activity: ResumeActivity, start: string): Promise<ApiResult<RichTogglEntry>>;
@@ -56,7 +66,7 @@ export interface ClientCoordinatorOptions {
   now?: () => Date;
   persistPresets?: (presets: readonly ResumePreset[]) => Promise<void>;
   publish?: (snapshot: ControlSnapshot, rendererState: RendererState) => void;
-  quotaGate: Pick<QuotaGate, "record">;
+  quotaGate: CoordinatorQuotaGate;
   timezone: string;
 }
 
@@ -106,18 +116,51 @@ function timerStateValue(state: ClientState): string {
   });
 }
 
+function compareRelayCursors(left: RelayCursor, right: RelayCursor): number {
+  const timeDifference = Date.parse(left.eventCreatedAt) - Date.parse(right.eventCreatedAt);
+  if (timeDifference !== 0) {
+    return Math.sign(timeDifference);
+  }
+  const leftId = BigInt(left.eventId);
+  const rightId = BigInt(right.eventId);
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
+function relayCursor(message: RelaySnapshotMessage): RelayCursor {
+  return {
+    eventCreatedAt: message.snapshot.eventCreatedAt,
+    eventId: message.snapshot.eventId,
+  };
+}
+
+function changeEndsEntry(message: RelayChangeMessage, entryId: string): boolean {
+  return (
+    message.change.entry.id === entryId &&
+    (message.change.action === "deleted" || message.change.entry.stop !== null)
+  );
+}
+
 export class ClientCoordinator {
   private ambiguousCreateUnresolved = false;
+  private authoritativeIdle = false;
   private readonly api: CoordinatorApi;
+  private commandActive = false;
   private confidence: Confidence;
   private error: ControlErrorCode | null = null;
   private lastToggleArrival: number | null = null;
-  private mutationCount = 0;
+  private mutationActive = false;
   private mutationEpoch = 0;
   private mutationTail: Promise<void> = Promise.resolve();
   private persistenceTail: Promise<void> = Promise.resolve();
   private presets: ResumePreset[];
-  private relaySnapshotNotBefore = Number.NEGATIVE_INFINITY;
+  private pendingRelaySnapshot: RelaySnapshotMessage | null = null;
+  private protectedCurrentId: string | null = null;
+  private relayConflictGeneration = 0;
+  private relayConflictUnresolved = false;
+  private relayConfirmationActive = false;
+  private relayConfirmationRequested = false;
+  private relayConfirmationTail: Promise<void> = Promise.resolve();
+  private relayCursor: RelayCursor | null = null;
   private state: ClientState;
   private readonly subscribers = new Set<Subscriber>();
   private timerRevision = 0;
@@ -187,11 +230,16 @@ export class ClientCoordinator {
       this.lastToggleArrival = arrival;
     }
 
-    return this.enqueueMutation(async () => {
-      if (duplicateToggle) {
-        this.commit(this.state);
-        return commandResult("duplicate_suppressed");
-      }
+    if (duplicateToggle) {
+      this.commit(this.state);
+      return Promise.resolve(commandResult("duplicate_suppressed"));
+    }
+    if (this.commandActive) {
+      this.commit(this.state, { error: "command_busy" });
+      return Promise.resolve(commandResult("failed", "command_busy"));
+    }
+
+    return this.startMutation(async () => {
       if (request.type === "toggle") {
         return this.toggleNow();
       }
@@ -225,37 +273,96 @@ export class ClientCoordinator {
   }
 
   applyRelay(message: RelayMessage): void {
-    if (
-      message.type === "snapshot" &&
-      Date.parse(message.snapshot.eventCreatedAt) < this.relaySnapshotNotBefore
-    ) {
+    const window = this.window(this.now());
+    if (message.type === "snapshot") {
+      const cursor = relayCursor(message);
+      const matchesProtectedCurrent =
+        message.snapshot.status === "running" &&
+        message.snapshot.entryId === this.protectedCurrentId;
+      const matchesCurrent =
+        message.snapshot.status === "running"
+          ? message.snapshot.entryId === this.state.current?.id
+          : this.state.current === null;
+      if (this.relayCursor !== null) {
+        const comparison = compareRelayCursors(cursor, this.relayCursor);
+        if (comparison <= 0) {
+          if (
+            comparison === 0 &&
+            !this.relayConflictUnresolved &&
+            ((this.authoritativeIdle && message.snapshot.status === "idle") ||
+              matchesProtectedCurrent ||
+              (!this.authoritativeIdle && this.protectedCurrentId === null && matchesCurrent))
+          ) {
+            this.protectedCurrentId = null;
+            this.authoritativeIdle = false;
+            this.commitRelayMessage(message, window);
+          }
+          return;
+        }
+      }
+      if (
+        this.pendingRelaySnapshot !== null &&
+        compareRelayCursors(cursor, relayCursor(this.pendingRelaySnapshot)) <= 0
+      ) {
+        return;
+      }
+      if (matchesProtectedCurrent) {
+        this.recordRelayCursor(cursor);
+        this.protectedCurrentId = null;
+        this.authoritativeIdle = false;
+        this.resolveRelayConflict();
+        this.commitRelayMessage(message, window);
+        return;
+      }
+      if (
+        this.relayConflictUnresolved ||
+        this.protectedCurrentId !== null ||
+        (this.authoritativeIdle && message.snapshot.status === "running")
+      ) {
+        this.deferRelayConflict(message);
+        return;
+      }
+
+      this.recordRelayCursor(cursor);
+      this.authoritativeIdle = false;
+      this.commitRelayMessage(message, window);
       return;
     }
-    const next = applyRelayMessage(this.state, message, this.window(this.now()));
-    const confidence = this.ambiguousCreateUnresolved ? this.confidence : "confirmed";
-    this.commit(next, { confidence });
+
+    const endsProtectedCurrent =
+      this.protectedCurrentId !== null && changeEndsEntry(message, this.protectedCurrentId);
+    if (endsProtectedCurrent) {
+      this.protectedCurrentId = null;
+      this.relayConflictUnresolved = true;
+      this.relayConflictGeneration += 1;
+    }
+    this.commitRelayMessage(message, window);
+    if (endsProtectedCurrent) {
+      this.requestRelayConfirmation();
+    }
   }
 
   async reconcile(kind: ReconciliationKind): Promise<boolean> {
-    if (this.mutationCount > 0) {
+    if (this.commandActive || this.relayConfirmationActive) {
       return false;
     }
     const revision = this.timerRevision;
     const epoch = this.mutationEpoch;
+    const relayGeneration = this.relayConflictGeneration;
     const now = this.now();
     const window = this.window(now);
 
     if (kind === "current") {
       const current = await this.api.fetchCurrent();
       this.recordQuota(current);
-      if (this.stale(revision, epoch)) {
+      if (this.stale(revision, epoch, relayGeneration)) {
         return false;
       }
       if (!current.ok) {
         this.commit(this.state, { error: apiError(current) });
         return false;
       }
-      this.commitRestCurrent(current.data, window, now.toISOString());
+      this.commitRestCurrent(current.data, window);
       return true;
     }
 
@@ -265,7 +372,7 @@ export class ClientCoordinator {
     ]);
     this.recordQuota(today);
     this.recordQuota(current);
-    if (this.stale(revision, epoch)) {
+    if (this.stale(revision, epoch, relayGeneration)) {
       return false;
     }
     if (!today.ok) {
@@ -287,7 +394,7 @@ export class ClientCoordinator {
     if (next.connection === "offline") {
       next = setConnection(next, "stale");
     }
-    this.markAuthoritativeTransition(now.toISOString());
+    next = this.confirmRestCurrent(next, current.data);
     this.ambiguousCreateUnresolved = false;
     this.commit(next, { confidence: "confirmed", error: null });
     await this.refreshPresets([...today.data, ...(current.data === null ? [] : [current.data])]);
@@ -295,7 +402,19 @@ export class ClientCoordinator {
   }
 
   async drain(): Promise<void> {
-    await this.mutationTail;
+    while (true) {
+      await this.mutationTail;
+      const confirmation = this.relayConfirmationTail;
+      await confirmation;
+      if (
+        confirmation === this.relayConfirmationTail &&
+        !this.commandActive &&
+        !this.mutationActive &&
+        !this.relayConfirmationActive
+      ) {
+        break;
+      }
+    }
     await this.persistenceTail;
   }
 
@@ -315,8 +434,13 @@ export class ClientCoordinator {
     return dayWindowAt(now, this.options.timezone);
   }
 
-  private stale(revision: number, epoch: number): boolean {
-    return revision !== this.timerRevision || epoch !== this.mutationEpoch;
+  private stale(revision: number, epoch: number, relayGeneration: number): boolean {
+    return (
+      this.commandActive ||
+      revision !== this.timerRevision ||
+      epoch !== this.mutationEpoch ||
+      relayGeneration !== this.relayConflictGeneration
+    );
   }
 
   private currentId(): string | null {
@@ -327,8 +451,153 @@ export class ClientCoordinator {
     this.options.quotaGate.record(result, this.now().getTime());
   }
 
-  private markAuthoritativeTransition(transitionAt: string): void {
-    this.relaySnapshotNotBefore = Math.max(this.relaySnapshotNotBefore, Date.parse(transitionAt));
+  private deferRelayConflict(message: RelaySnapshotMessage): void {
+    this.pendingRelaySnapshot = message;
+    this.relayConflictUnresolved = true;
+    this.relayConflictGeneration += 1;
+    this.commit(this.state, { confidence: "uncertain" });
+    this.requestRelayConfirmation();
+  }
+
+  private resolveRelayConflict(): void {
+    if (!this.relayConflictUnresolved && this.pendingRelaySnapshot === null) {
+      return;
+    }
+    this.pendingRelaySnapshot = null;
+    this.relayConflictUnresolved = false;
+    this.relayConfirmationRequested = false;
+    this.relayConflictGeneration += 1;
+  }
+
+  private commitRelayMessage(message: RelayMessage, window: DayWindow): void {
+    const next = applyRelayMessage(this.state, message, window);
+    const confidence =
+      this.ambiguousCreateUnresolved || this.relayConflictUnresolved ? "uncertain" : "confirmed";
+    this.commit(next, { confidence });
+  }
+
+  private recordRelayCursor(cursor: RelayCursor): void {
+    if (this.relayCursor === null || compareRelayCursors(cursor, this.relayCursor) > 0) {
+      this.relayCursor = cursor;
+    }
+  }
+
+  private confirmRestCurrent(nextState: ClientState, current: RichTogglEntry | null): ClientState {
+    const previousCurrentId = this.state.current?.id ?? null;
+    const pending = this.pendingRelaySnapshot;
+    if (pending !== null) {
+      this.recordRelayCursor(relayCursor(pending));
+    }
+    const currentId = current?.id ?? null;
+    const alreadyOrderedByRelay =
+      this.state.connection === "connected" &&
+      this.confidence === "confirmed" &&
+      this.protectedCurrentId === null &&
+      !this.authoritativeIdle &&
+      this.relayCursor !== null &&
+      pending === null &&
+      previousCurrentId === currentId;
+    const pendingConfirmsCurrent =
+      current !== null &&
+      pending?.snapshot.status === "running" &&
+      pending.snapshot.entryId === current.id;
+    this.protectedCurrentId =
+      alreadyOrderedByRelay || pendingConfirmsCurrent ? null : (current?.id ?? null);
+    this.authoritativeIdle = current === null && !alreadyOrderedByRelay;
+    this.resolveRelayConflict();
+    return current === null && previousCurrentId !== null
+      ? applyConfirmedStoppedId(nextState, previousCurrentId)
+      : nextState;
+  }
+
+  private confirmLocalCurrent(nextState: ClientState, current: RichTogglEntry): void {
+    const pending = this.pendingRelaySnapshot;
+    const pendingConfirmsCurrent =
+      pending?.snapshot.status === "running" && pending.snapshot.entryId === current.id;
+    const alreadyOrderedByRelay =
+      this.state.connection === "connected" &&
+      this.confidence === "confirmed" &&
+      pending === null &&
+      !this.relayConflictUnresolved &&
+      this.relayCursor !== null &&
+      this.state.current?.id === current.id;
+    this.authoritativeIdle = false;
+    this.protectedCurrentId = pendingConfirmsCurrent || alreadyOrderedByRelay ? null : current.id;
+    if (pendingConfirmsCurrent && pending !== null) {
+      this.recordRelayCursor(relayCursor(pending));
+      this.resolveRelayConflict();
+    }
+    if (nextState.current?.id !== current.id) {
+      this.requestRelayConfirmation();
+    }
+  }
+
+  private confirmStoppedEntry(entryId: string, nextState: ClientState): void {
+    const alreadyOrderedByRelay =
+      this.state.connection === "connected" &&
+      this.confidence === "confirmed" &&
+      nextState.current === null &&
+      this.state.current === null &&
+      !this.relayConflictUnresolved &&
+      this.relayCursor !== null;
+    if (this.protectedCurrentId === entryId) {
+      this.protectedCurrentId = null;
+    }
+    this.authoritativeIdle = nextState.current === null && !alreadyOrderedByRelay;
+    if (this.relayConflictUnresolved) {
+      this.requestRelayConfirmation();
+    }
+  }
+
+  private requestRelayConfirmation(): void {
+    if (!this.relayConflictUnresolved) {
+      return;
+    }
+    this.relayConfirmationRequested = true;
+    if (this.commandActive || this.mutationActive || this.relayConfirmationActive) {
+      return;
+    }
+
+    const requestedAt = this.now().getTime();
+    if (this.options.quotaGate.allowsRequest?.(requestedAt) === false) {
+      this.relayConfirmationRequested = false;
+      this.commit(this.state, { confidence: "uncertain", error: "quota_exhausted" });
+      return;
+    }
+    this.options.quotaGate.recordAttempt?.("current", requestedAt);
+    this.relayConfirmationRequested = false;
+    this.relayConfirmationActive = true;
+    const mutationEpoch = this.mutationEpoch;
+    const relayGeneration = this.relayConflictGeneration;
+    const confirmation = Promise.resolve()
+      .then(() => this.api.fetchCurrent())
+      .then((current) => {
+        this.recordQuota(current);
+        if (
+          mutationEpoch !== this.mutationEpoch ||
+          relayGeneration !== this.relayConflictGeneration
+        ) {
+          this.relayConfirmationRequested = this.relayConflictUnresolved;
+          return;
+        }
+        if (!current.ok) {
+          this.relayConfirmationRequested = false;
+          this.commit(this.state, { confidence: "uncertain", error: apiError(current) });
+          return;
+        }
+        this.commitRestCurrent(current.data, this.window(this.now()));
+      })
+      .catch((error: unknown) => {
+        this.options.log?.("relay_confirmation_failed", error);
+        this.commit(this.state, { confidence: "uncertain", error: "request_failed" });
+      })
+      .finally(() => {
+        this.relayConfirmationActive = false;
+        if (this.relayConfirmationRequested) {
+          this.requestRelayConfirmation();
+        }
+      });
+    this.relayConfirmationTail = confirmation;
   }
 
   private commit(
@@ -362,18 +631,37 @@ export class ClientCoordinator {
     }
   }
 
-  private enqueueMutation(work: () => Promise<CommandResult>): Promise<CommandResult> {
-    this.mutationEpoch += 1;
-    this.mutationCount += 1;
-    const result = this.mutationTail.then(work, work);
+  private startMutation(work: () => Promise<CommandResult>): Promise<CommandResult> {
+    this.commandActive = true;
+    const result = Promise.resolve()
+      .then(() => this.beginMutation())
+      .then(work)
+      .then((command) => {
+        if (this.error === "command_busy") {
+          this.commit(this.state, { error: command.error });
+        }
+        return command;
+      });
     const settled = result.finally(() => {
-      this.mutationCount -= 1;
+      this.mutationActive = false;
+      this.commandActive = false;
+      if (this.relayConfirmationRequested) {
+        this.requestRelayConfirmation();
+      }
     });
     this.mutationTail = settled.then(
       () => undefined,
       () => undefined,
     );
     return settled;
+  }
+
+  private async beginMutation(): Promise<void> {
+    if (this.relayConfirmationActive) {
+      await this.relayConfirmationTail;
+    }
+    this.mutationEpoch += 1;
+    this.mutationActive = true;
   }
 
   private async toggleNow(): Promise<CommandResult> {
@@ -384,19 +672,23 @@ export class ClientCoordinator {
   }
 
   private async ensureTrustedCurrent(): Promise<boolean> {
-    if (this.state.connection === "connected" && this.confidence === "confirmed") {
+    if (
+      this.state.connection === "connected" &&
+      this.confidence === "confirmed" &&
+      !this.relayConflictUnresolved
+    ) {
       return true;
     }
     const revision = this.timerRevision;
-    const requestedAt = this.timestamp();
+    const relayGeneration = this.relayConflictGeneration;
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
-    if (revision !== this.timerRevision) {
-      if (this.confidence === "confirmed") {
-        return true;
+    if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
+      const trusted = this.confidence === "confirmed" && !this.relayConflictUnresolved;
+      if (!trusted) {
+        this.commit(this.state, { error: "state_unconfirmed" });
       }
-      this.commit(this.state, { error: "state_unconfirmed" });
-      return false;
+      return trusted;
     }
     if (!current.ok) {
       this.commit(this.state, {
@@ -405,20 +697,16 @@ export class ClientCoordinator {
       });
       return false;
     }
-    this.commitRestCurrent(current.data, this.window(this.now()), requestedAt);
+    this.commitRestCurrent(current.data, this.window(this.now()));
     return true;
   }
 
-  private commitRestCurrent(
-    current: RichTogglEntry | null,
-    window: DayWindow,
-    transitionAt: string,
-  ): void {
+  private commitRestCurrent(current: RichTogglEntry | null, window: DayWindow): void {
     let next = applyConfirmedCurrent(this.state, current, window, this.timestamp());
     if (next.connection === "offline") {
       next = setConnection(next, "stale");
     }
-    this.markAuthoritativeTransition(transitionAt);
+    next = this.confirmRestCurrent(next, current);
     this.ambiguousCreateUnresolved = false;
     this.commit(next, { confidence: "confirmed", error: null });
   }
@@ -439,32 +727,40 @@ export class ClientCoordinator {
     const window = this.window(this.now());
     if (stopped.ok) {
       const next = setPending(applyRichStopResult(this.state, stopped.data, window), null);
-      this.commit(next, { confidence: "confirmed", error: null });
-      await this.refreshPresets([stopped.data]);
+      this.confirmStoppedEntry(target.id, next);
+      this.commit(next, {
+        confidence: this.relayConflictUnresolved ? "uncertain" : "confirmed",
+        error: null,
+      });
+      void this.refreshPresets([stopped.data]);
       return commandResult("stopped");
     }
 
     if (stopped.status === 409) {
       const next = setPending(applyConfirmedStoppedId(this.state, target.id), null);
-      this.commit(next, { confidence: "confirmed", error: null });
+      this.confirmStoppedEntry(target.id, next);
+      this.commit(next, {
+        confidence: this.relayConflictUnresolved ? "uncertain" : "confirmed",
+        error: null,
+      });
       return commandResult("stopped");
     }
 
     if (stopped.status === 404) {
-      const reconciliationRequestedAt = this.timestamp();
       const revision = this.timerRevision;
+      const relayGeneration = this.relayConflictGeneration;
       const current = await this.api.fetchCurrent();
       this.recordQuota(current);
-      if (revision !== this.timerRevision) {
+      if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
         return this.finishMissingStopFromCurrentState(target.id);
       }
       if (current.ok) {
         if (current.data?.id === target.id) {
-          this.commitRestCurrent(current.data, window, reconciliationRequestedAt);
+          this.commitRestCurrent(current.data, window);
           this.commit(setPending(this.state, null), { error: "request_failed" });
           return commandResult("failed", "request_failed");
         }
-        this.commitRestCurrent(current.data, window, reconciliationRequestedAt);
+        this.commitRestCurrent(current.data, window);
         const next = setPending(applyConfirmedStoppedId(this.state, target.id), null);
         this.commit(next, { error: null });
         return commandResult("stopped");
@@ -488,19 +784,22 @@ export class ClientCoordinator {
       return commandResult("failed", "request_failed");
     }
     const next = setPending(applyConfirmedStoppedId(this.state, entryId), null);
+    this.confirmStoppedEntry(entryId, next);
     this.commit(next, { error: null });
     return commandResult("stopped");
   }
 
   private async resumeNow(presetId: string | null): Promise<CommandResult> {
-    if (this.confidence !== "confirmed") {
+    if (this.state.current !== null) {
+      this.commit(this.state, {
+        ...(this.relayConflictUnresolved ? {} : { error: null }),
+      });
+      return commandResult("already_running");
+    }
+    if (this.confidence !== "confirmed" || this.relayConflictUnresolved) {
       const error = this.ambiguousCreateUnresolved ? "ambiguous_create" : "state_unconfirmed";
       this.commit(this.state, { error });
       return commandResult("failed", error);
-    }
-    if (this.state.current !== null) {
-      this.commit(this.state, { error: null });
-      return commandResult("already_running");
     }
     const preset =
       presetId === null
@@ -526,9 +825,14 @@ export class ClientCoordinator {
       const currentId = this.currentId();
       const conflictingCurrent = currentId !== null && currentId !== created.data.id;
       const next = setPending(applyRichCreateResult(this.state, created.data, window), null);
-      this.markAuthoritativeTransition(start);
-      this.commit(next, { confidence: "confirmed", error: null });
-      await this.refreshPresets([created.data]);
+      if (next.current?.id === created.data.id) {
+        this.confirmLocalCurrent(next, created.data);
+      }
+      this.commit(next, {
+        confidence: this.relayConflictUnresolved ? "uncertain" : "confirmed",
+        error: null,
+      });
+      void this.refreshPresets([created.data]);
       if (conflictingCurrent) {
         await this.reconcileCurrentWithinMutation();
       }
@@ -542,10 +846,10 @@ export class ClientCoordinator {
     }
 
     const revision = this.timerRevision;
-    const reconciliationRequestedAt = this.timestamp();
+    const relayGeneration = this.relayConflictGeneration;
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
-    if (revision !== this.timerRevision) {
+    if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
       if (this.confidence !== "confirmed") {
         this.ambiguousCreateUnresolved = true;
       }
@@ -567,10 +871,10 @@ export class ClientCoordinator {
     }
 
     const matching = current.data !== null && matchesActivity(current.data, activity, start);
-    this.commitRestCurrent(current.data, window, reconciliationRequestedAt);
+    this.commitRestCurrent(current.data, window);
     this.commit(setPending(this.state, null), { error: matching ? null : "request_failed" });
     if (matching && current.data !== null) {
-      await this.refreshPresets([current.data]);
+      void this.refreshPresets([current.data]);
       return commandResult("resumed");
     }
     return commandResult("failed", "request_failed");
@@ -578,14 +882,14 @@ export class ClientCoordinator {
 
   private async reconcileCurrentWithinMutation(): Promise<void> {
     const revision = this.timerRevision;
-    const requestedAt = this.timestamp();
+    const relayGeneration = this.relayConflictGeneration;
     const current = await this.api.fetchCurrent();
     this.recordQuota(current);
-    if (revision !== this.timerRevision) {
+    if (revision !== this.timerRevision || relayGeneration !== this.relayConflictGeneration) {
       return;
     }
     if (current.ok) {
-      this.commitRestCurrent(current.data, this.window(this.now()), requestedAt);
+      this.commitRestCurrent(current.data, this.window(this.now()));
     } else {
       this.commit(this.state, { confidence: "uncertain", error: apiError(current) });
     }

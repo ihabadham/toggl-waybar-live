@@ -80,10 +80,20 @@ user-controlled labels are never parsed as shell commands or identifiers.
 Requests and responses use a small versioned, runtime-validated local schema.
 Malformed and oversized messages are rejected.
 
-The daemon serializes all mutations. State commits from commands, relay
+The daemon admits only one mutation at a time. Concurrent commands fail fast
+instead of waiting in a write backlog. State commits from commands, relay
 messages, and reconciliation use one ordered transition path. A reconciliation
 result that began before a mutation is discarded rather than overwriting the
 newer command result.
+
+A local or REST-confirmed running entry is protected until the relay catches
+up to that entry. REST-confirmed idle is protected as well, so a delayed relay
+snapshot cannot resurrect an older unseen timer after startup or reconnect.
+When relay order is ambiguous, the daemon retains the newest relay candidate
+by its server cursor and performs one coalesced current-entry check. It does not
+assume that adjacent snapshot and change frames belong to the same transition.
+This also covers an external switch whose create event arrives before the stop
+event for the previous timer.
 
 ### Resume presets
 
@@ -128,15 +138,24 @@ When relay state is stale, the daemon confirms the current entry through Toggl
 before interpreting a toggle. If confirmation cannot complete, the command
 fails without mutating anything.
 
-Only one mutation may be in flight. Explicit Stop and Resume operations are
-state-specific, making repeated invocations harmless. Toggle additionally has
-a short monotonic duplicate-suppression window so mouse double-clicks and key
-repeat cannot stop and immediately restart a timer.
+Only one mutation may be in flight. A concurrent command returns
+`command_busy` immediately and is never run later. Explicit Stop and Resume
+operations are state-specific, making repeated invocations harmless. Toggle
+additionally has a short monotonic duplicate-suppression window so mouse
+double-clicks and key repeat cannot stop and immediately restart a timer.
+An admitted command makes at most four deadline-bounded Toggl requests, including
+an already-running relay conflict check that the command waits for and reuses. The
+local client's response timeout is derived from that maximum plus local
+processing grace, so it does not expire before one worst-case operation. Preset
+persistence continues on the daemon's tracked persistence queue and is drained
+during shutdown; it does not hold the interactive response open.
 
 The UI may show `Stopping…` or `Resuming…`, but it does not claim the underlying
 state changed until Toggl accepts the request. Toggl quota headers from writes
 feed the same local quota accounting used by reconciliation, and interactive
-commands take priority over background refreshes.
+commands take priority over background refreshes. Ambiguous relay bursts admit
+at most one current-entry confirmation at a time; that confirmation is recorded
+in the same quota gate and is skipped while its reserve is active.
 
 ## Eww integration
 
@@ -161,9 +180,9 @@ prevents later worktree removal from breaking the running service.
 
 Pending state is visible in Waybar and the drawer. Drawer failures are concise
 and actionable, including daemon unavailable, state unconfirmed, quota
-exhausted, authentication failed, and ambiguous creation. A failed command
-does not erase the last trusted timer state. Errors clear on dismissal or the
-next successful command.
+exhausted, authentication failed, ambiguous creation, and another command
+already being active. A failed command does not erase the last trusted timer
+state. Errors clear on dismissal or the next successful command.
 
 ## Verification
 
@@ -172,9 +191,10 @@ Automated coverage includes:
 - exact create and stop request paths, bodies, responses, and quota headers;
 - preset identity, ordering, atomic persistence, midnight, and restart behavior;
 - valid, malformed, and oversized socket messages and socket permissions;
-- command serialization, duplicate toggle suppression, and daemon absence;
+- bounded command admission, duplicate toggle suppression, and daemon absence;
 - stale-state confirmation and ambiguous creation recovery;
-- external stop conflicts, webhook echoes, and reconciliation races;
+- startup idle fencing, create-before-stop external switches, webhook echoes,
+  and reconciliation races;
 - the live drawer view stream; and
 - fake-Toggl end-to-end stop, resume-last, and resume-selected flows.
 

@@ -1,7 +1,11 @@
 import type { RelayMessage } from "@toggl-waybar-live/shared";
 import { describe, expect, it, vi } from "vitest";
 
-import { ClientCoordinator, type CoordinatorApi } from "../src/coordinator.js";
+import {
+  ClientCoordinator,
+  type ClientCoordinatorOptions,
+  type CoordinatorApi,
+} from "../src/coordinator.js";
 import type { ResumePreset } from "../src/presets.js";
 import { createState, setConnection } from "../src/state.js";
 import { type ApiResult, type RichTogglEntry, TogglApi } from "../src/toggl-api.js";
@@ -80,6 +84,7 @@ function deferred<T>(): {
 function runningSnapshot(
   value: RichTogglEntry,
   eventCreatedAt = "2026-08-27T12:00:01Z",
+  eventId = "10",
 ): RelayMessage {
   return {
     version: 1,
@@ -91,30 +96,30 @@ function runningSnapshot(
       projectId: value.projectId,
       description: value.description,
       start: value.start,
-      eventId: "10",
+      eventId,
       eventCreatedAt,
     },
   };
 }
 
-function idleSnapshot(eventCreatedAt: string): RelayMessage {
+function idleSnapshot(eventCreatedAt: string, eventId = "11"): RelayMessage {
   return {
     version: 1,
     type: "snapshot",
     snapshot: {
       status: "idle",
       updatedAt: eventCreatedAt,
-      eventId: "11",
+      eventId,
       eventCreatedAt,
     },
   };
 }
 
-function changed(value: RichTogglEntry): RelayMessage {
+function changed(value: RichTogglEntry, action: "created" | "updated" = "updated"): RelayMessage {
   return {
     version: 1,
     type: "entry.changed",
-    change: { action: "updated", entry: value },
+    change: { action, entry: value },
   };
 }
 
@@ -145,6 +150,7 @@ function coordinator(
     initialCurrent?: RichTogglEntry | null;
     monotonicNow?: () => number;
     persistPresets?: (presets: readonly ResumePreset[]) => Promise<void>;
+    quotaGate?: ClientCoordinatorOptions["quotaGate"];
     quotaRecord?: (result: ApiResult<unknown>, now: number) => void;
   } = {},
 ): ClientCoordinator {
@@ -155,7 +161,7 @@ function coordinator(
   const instance = new ClientCoordinator({
     api: apiValue,
     timezone: "Africa/Cairo",
-    quotaGate: { record: options.quotaRecord ?? vi.fn() },
+    quotaGate: options.quotaGate ?? { record: options.quotaRecord ?? vi.fn() },
     now: () => now,
     ...(options.monotonicNow === undefined ? {} : { monotonicNow: options.monotonicNow }),
     initialState,
@@ -178,6 +184,22 @@ describe("client coordinator", () => {
     expect(instance.snapshot().confidence).toBe("confirmed");
   });
 
+  it.each([
+    ["running", runningSnapshot(entry(), "2026-08-27T12:00:01Z", "20")],
+    ["idle", idleSnapshot("2026-08-27T12:00:01Z", "20")],
+  ])("reconfirms ordinary %s state from the equal reconnect snapshot", (status, message) => {
+    const fetchCurrent = vi.fn(async () => success(null));
+    const instance = coordinator(api({ fetchCurrent }));
+
+    instance.applyRelay(message);
+    instance.setConnection("stale");
+    instance.setConnection("connected");
+    instance.applyRelay(message);
+
+    expect(instance.snapshot()).toMatchObject({ status, confidence: "confirmed" });
+    expect(fetchCurrent).not.toHaveBeenCalled();
+  });
+
   it("suppresses Toggle from ingress monotonic time", async () => {
     const create = deferred<ApiResult<RichTogglEntry>>();
     const createRunningEntry = vi.fn(() => create.promise);
@@ -196,25 +218,92 @@ describe("client coordinator", () => {
     expect(createRunningEntry).toHaveBeenCalledTimes(1);
   });
 
-  it("serializes two real API mutations", async () => {
-    const stopped = deferred<ApiResult<RichTogglEntry>>();
-    const created = deferred<ApiResult<RichTogglEntry>>();
-    const stopTimeEntry = vi.fn(() => stopped.promise);
-    const createRunningEntry = vi.fn(() => created.promise);
-    const instance = coordinator(api({ stopTimeEntry, createRunningEntry }), {
-      initialCurrent: entry(),
+  it("rejects a concurrent worst-case command without adding it to the drain backlog", async () => {
+    const initialCurrent = deferred<ApiResult<RichTogglEntry | null>>();
+    const create = deferred<ApiResult<RichTogglEntry>>();
+    const createConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockImplementationOnce(() => initialCurrent.promise)
+      .mockImplementationOnce(() => createConfirmation.promise);
+    const createRunningEntry = vi.fn(() => create.promise);
+    const stopTimeEntry = vi.fn();
+    const times = [0, 1_000];
+    const instance = coordinator(api({ fetchCurrent, createRunningEntry, stopTimeEntry }), {
+      connected: false,
+      confidence: "uncertain",
+      monotonicNow: () => times.shift() ?? 1_000,
     });
 
-    const stopCommand = instance.stop();
-    const resumeCommand = instance.resume();
-    await vi.waitFor(() => expect(stopTimeEntry).toHaveBeenCalledTimes(1));
-    expect(createRunningEntry).not.toHaveBeenCalled();
+    const first = instance.toggle();
+    const second = instance.toggle();
+    let drained = false;
+    const draining = instance.drain().then(() => {
+      drained = true;
+    });
 
-    stopped.resolve(success(entry({ stop: "2026-08-27T12:10:00Z", durationSeconds: 600 })));
-    await expect(stopCommand).resolves.toMatchObject({ outcome: "stopped" });
+    await expect(second).resolves.toMatchObject({ outcome: "failed", error: "command_busy" });
+    expect(drained).toBe(false);
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(1));
+    initialCurrent.resolve(success(null));
     await vi.waitFor(() => expect(createRunningEntry).toHaveBeenCalledTimes(1));
-    created.resolve(success(entry({ id: "102" })));
-    await expect(resumeCommand).resolves.toMatchObject({ outcome: "resumed" });
+    create.resolve(failure({ mayHaveSucceeded: true, status: null }));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+    createConfirmation.resolve(success(entry()));
+
+    await expect(first).resolves.toMatchObject({ outcome: "resumed" });
+    await draining;
+    expect(fetchCurrent).toHaveBeenCalledTimes(2);
+    expect(createRunningEntry).toHaveBeenCalledTimes(1);
+    expect(stopTimeEntry).not.toHaveBeenCalled();
+  });
+
+  it("responds before preset persistence settles while drain still waits for it", async () => {
+    const persisted = deferred<void>();
+    const persistPresets = vi.fn(() => persisted.promise);
+    const instance = coordinator(api(), { persistPresets });
+
+    const command = instance.resume();
+    await vi.waitFor(() => expect(persistPresets).toHaveBeenCalledTimes(1));
+    await expect(command).resolves.toMatchObject({ outcome: "resumed", error: null });
+
+    let drained = false;
+    const draining = instance.drain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    persisted.resolve(undefined);
+    await draining;
+    expect(drained).toBe(true);
+  });
+
+  it("drains an in-flight relay conflict confirmation", async () => {
+    const confirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(null))
+      .mockImplementationOnce(() => confirmation.promise);
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.applyRelay(runningSnapshot(entry({ id: "700" }), "2026-08-27T12:00:01Z", "20"));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+
+    let drained = false;
+    const draining = instance.drain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    confirmation.resolve(success(null));
+    await draining;
+    expect(drained).toBe(true);
   });
 
   it("drains a mutation when Toggl never settles its requests", async () => {
@@ -325,29 +414,433 @@ describe("client coordinator", () => {
     await command;
   });
 
+  it("rejects a stale idle snapshot with an equal server timestamp after a successful create", async () => {
+    const created = entry();
+    const createRunningEntry = vi.fn(async () => success(created));
+    const instance = coordinator(
+      api({ createRunningEntry, fetchCurrent: vi.fn(async () => success(created)) }),
+    );
+
+    await expect(instance.resume()).resolves.toMatchObject({ outcome: "resumed" });
+    instance.applyRelay(idleSnapshot("2026-08-27T12:00:00Z"));
+
+    expect(instance.snapshot().current?.id).toBe("101");
+    await expect(instance.resume()).resolves.toMatchObject({ outcome: "already_running" });
+    expect(createRunningEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a stale running snapshot and its pair despite a later server timestamp", async () => {
+    const created = entry();
+    const createRunningEntry = vi.fn(async () => success(entry()));
+    const stale = entry({
+      id: "700",
+      description: "Earlier external timer",
+      start: "2026-08-27T11:00:00Z",
+    });
+    const instance = coordinator(
+      api({ createRunningEntry, fetchCurrent: vi.fn(async () => success(created)) }),
+    );
+
+    await instance.resume();
+    instance.applyRelay(runningSnapshot(stale, "2026-08-27T13:00:00Z"));
+    instance.applyRelay(changed(stale, "created"));
+
+    expect(instance.snapshot().current?.id).toBe("101");
+    await expect(instance.resume()).resolves.toMatchObject({ outcome: "already_running" });
+    expect(createRunningEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirms a running snapshot after authoritative startup idle before applying it", async () => {
+    const stale = entry({ id: "700", description: "Delayed stale timer" });
+    const genuine = entry({ id: "800", description: "New external timer" });
+    const staleConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const genuineConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(null))
+      .mockImplementationOnce(() => staleConfirmation.promise)
+      .mockImplementationOnce(() => genuineConfirmation.promise);
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(stale, "2026-08-27T12:00:01Z", "20"));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+    expect(instance.snapshot()).toMatchObject({ current: null, confidence: "uncertain" });
+
+    staleConfirmation.resolve(success(null));
+    await vi.waitFor(() =>
+      expect(instance.snapshot()).toMatchObject({ current: null, confidence: "confirmed" }),
+    );
+    instance.applyRelay(runningSnapshot(stale, "2026-08-27T12:00:01Z", "20"));
+    await Promise.resolve();
+    expect(fetchCurrent).toHaveBeenCalledTimes(2);
+
+    instance.applyRelay(runningSnapshot(genuine, "2026-08-27T12:00:02Z", "21"));
+    instance.applyRelay(changed(genuine, "created"));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(3));
+    expect(instance.snapshot()).toMatchObject({ current: null, confidence: "uncertain" });
+
+    genuineConfirmation.resolve(success(genuine));
+    await vi.waitFor(() =>
+      expect(instance.snapshot()).toMatchObject({
+        current: { id: genuine.id },
+        confidence: "confirmed",
+      }),
+    );
+    expect(fetchCurrent).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases an authoritative idle fence when the relay echoes idle", async () => {
+    const original = entry({ id: "700", description: "Previous timer" });
+    const external = entry({ id: "800", description: "New external timer" });
+    const fetchCurrent = vi.fn(async () => success(null));
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    instance.applyRelay(runningSnapshot(original, "2026-08-27T12:00:00Z", "19"));
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(idleSnapshot("2026-08-27T12:00:01Z", "20"));
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "21"));
+    instance.applyRelay(changed(external, "created"));
+
+    expect(instance.snapshot()).toMatchObject({
+      current: { id: external.id },
+      confidence: "confirmed",
+    });
+    expect(fetchCurrent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-arm a healthy relay-ordered idle state during REST reconciliation", async () => {
+    const external = entry({ id: "800", description: "New external timer" });
+    const fetchCurrent = vi.fn(async () => success(null));
+    const instance = coordinator(api({ fetchCurrent }));
+
+    instance.applyRelay(idleSnapshot("2026-08-27T12:00:01Z", "20"));
+    await instance.reconcile("current");
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "21"));
+
+    expect(instance.snapshot().current?.id).toBe(external.id);
+    expect(fetchCurrent).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences a disconnected REST match before accepting a newer relay snapshot", async () => {
+    const original = entry({ id: "700", description: "Original" });
+    const delayed = entry({ id: "800", description: "Delayed timer" });
+    const confirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(original))
+      .mockImplementationOnce(() => confirmation.promise);
+    const instance = coordinator(api({ fetchCurrent }), { initialCurrent: original });
+
+    instance.setConnection("stale");
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(delayed, "2026-08-27T12:00:02Z", "21"));
+
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+    expect(instance.snapshot()).toMatchObject({
+      current: { id: original.id },
+      confidence: "uncertain",
+    });
+    confirmation.resolve(success(original));
+    await vi.waitFor(() =>
+      expect(instance.snapshot()).toMatchObject({
+        current: { id: original.id },
+        confidence: "confirmed",
+      }),
+    );
+  });
+
+  it("releases a disconnected REST fence on the equal running relay echo", async () => {
+    const original = entry({ id: "700", description: "Original" });
+    const replacement = entry({ id: "800", description: "Replacement" });
+    const fetchCurrent = vi.fn(async () => success(original));
+    const instance = coordinator(api({ fetchCurrent }), { initialCurrent: original });
+
+    instance.setConnection("stale");
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(original));
+    instance.applyRelay(runningSnapshot(replacement, "2026-08-27T12:00:02Z", "21"));
+
+    expect(instance.snapshot()).toMatchObject({
+      current: { id: replacement.id },
+      confidence: "confirmed",
+    });
+    expect(fetchCurrent).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces an in-flight conflict check onto the newest relay candidate", async () => {
+    const first = entry({ id: "700", description: "First candidate" });
+    const latest = entry({ id: "800", description: "Latest candidate" });
+    const firstConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const latestConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(null))
+      .mockImplementationOnce(() => firstConfirmation.promise)
+      .mockImplementationOnce(() => latestConfirmation.promise);
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.applyRelay(runningSnapshot(first, "2026-08-27T12:00:01Z", "20"));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+    instance.applyRelay(runningSnapshot(latest, "2026-08-27T12:00:02Z", "21"));
+
+    firstConfirmation.resolve(success(first));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(3));
+    latestConfirmation.resolve(success(latest));
+
+    await vi.waitFor(() =>
+      expect(instance.snapshot()).toMatchObject({
+        current: { id: latest.id },
+        confidence: "confirmed",
+      }),
+    );
+    expect(fetchCurrent).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry a failed confirmation for the same relay cursor", async () => {
+    const stale = entry({ id: "700", description: "Delayed stale timer" });
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(null))
+      .mockResolvedValueOnce(failure())
+      .mockResolvedValueOnce(success(null));
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    const delayed = runningSnapshot(stale, "2026-08-27T12:00:01Z", "20");
+    instance.applyRelay(delayed);
+    await vi.waitFor(() => expect(instance.snapshot().error).toBe("request_failed"));
+
+    instance.applyRelay(delayed);
+    instance.setConnection("stale");
+    instance.setConnection("connected");
+    await Promise.resolve();
+    expect(fetchCurrent).toHaveBeenCalledTimes(2);
+
+    await expect(instance.stop()).resolves.toMatchObject({ outcome: "already_idle" });
+    expect(fetchCurrent).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not auto-retry after a command shares a failed confirmation", async () => {
+    const stale = entry({ id: "700", description: "Delayed stale timer" });
+    const automatic = deferred<ApiResult<RichTogglEntry | null>>();
+    const explicit = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(null))
+      .mockImplementationOnce(() => automatic.promise)
+      .mockImplementationOnce(() => explicit.promise);
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(stale, "2026-08-27T12:00:01Z", "20"));
+    const command = instance.stop();
+    automatic.resolve(failure());
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(3));
+    explicit.resolve(failure());
+
+    await expect(command).resolves.toMatchObject({ outcome: "failed", error: "state_unconfirmed" });
+    await instance.drain();
+    expect(fetchCurrent).toHaveBeenCalledTimes(3);
+  });
+
+  it("blocks Resume after a bare protected-current stop until confirmation", async () => {
+    const original = entry({ id: "600", description: "Original" });
+    const confirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(original))
+      .mockImplementationOnce(() => confirmation.promise);
+    const createRunningEntry = vi.fn(async () => success(entry()));
+    const instance = coordinator(api({ fetchCurrent, createRunningEntry }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(
+      changed({ ...original, stop: "2026-08-27T12:10:00Z", durationSeconds: 600 }),
+    );
+    const command = instance.resume();
+    expect(instance.snapshot().confidence).toBe("uncertain");
+    expect(createRunningEntry).not.toHaveBeenCalled();
+    confirmation.resolve(failure());
+
+    await expect(command).resolves.toMatchObject({ outcome: "failed", error: "state_unconfirmed" });
+    expect(createRunningEntry).not.toHaveBeenCalled();
+  });
+
+  it("does not spend the quota reserve on relay conflict confirmation", async () => {
+    const stale = entry({ id: "700", description: "Delayed stale timer" });
+    const fetchCurrent = vi.fn(async () => success(null));
+    const allowsRequest = vi.fn(() => false);
+    const recordAttempt = vi.fn();
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+      quotaGate: { allowsRequest, record: vi.fn(), recordAttempt },
+    });
+
+    await instance.reconcile("current");
+    const delayed = runningSnapshot(stale, "2026-08-27T12:00:01Z", "20");
+    instance.applyRelay(delayed);
+    instance.applyRelay(delayed);
+
+    expect(instance.snapshot()).toMatchObject({
+      current: null,
+      confidence: "uncertain",
+      error: "quota_exhausted",
+    });
+    expect(fetchCurrent).toHaveBeenCalledTimes(1);
+    expect(allowsRequest).toHaveBeenCalledTimes(1);
+    expect(recordAttempt).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ["idle", idleSnapshot("2026-08-27T11:59:59Z")],
-    [
-      "another running entry",
-      runningSnapshot(
-        entry({ id: "700", description: "Earlier external timer" }),
-        "2026-08-27T11:59:59Z",
+    ["standalone reconnect", false],
+    ["create-before-stop", true],
+  ])("retains a %s switch candidate until REST confirms it", async (_scenario, includeCreate) => {
+    const original = entry({ id: "600", description: "Original" });
+    const replacement = entry({ id: "700", description: "Replacement" });
+    const preStopConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const switchConfirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(original))
+      .mockImplementationOnce(() => preStopConfirmation.promise)
+      .mockImplementationOnce(() => switchConfirmation.promise);
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(replacement, "2026-08-27T12:10:00Z", "30"));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+    if (includeCreate) {
+      instance.applyRelay(changed(replacement, "created"));
+    }
+    instance.applyRelay(
+      changed(
+        entry({
+          ...original,
+          stop: "2026-08-27T12:10:00Z",
+          durationSeconds: 600,
+        }),
       ),
-    ],
-  ])(
-    "rejects a delayed %s snapshot after a successful create",
-    async (_description, delayedSnapshot) => {
-      const createRunningEntry = vi.fn(async () => success(entry()));
-      const instance = coordinator(api({ createRunningEntry }));
+    );
 
-      await expect(instance.resume()).resolves.toMatchObject({ outcome: "resumed" });
-      instance.applyRelay(delayedSnapshot);
+    expect(instance.snapshot()).toMatchObject({ current: null, confidence: "uncertain" });
 
-      expect(instance.snapshot().current?.id).toBe("101");
-      await expect(instance.resume()).resolves.toMatchObject({ outcome: "already_running" });
-      expect(createRunningEntry).toHaveBeenCalledTimes(1);
-    },
-  );
+    preStopConfirmation.resolve(success(original));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(3));
+    switchConfirmation.resolve(success(replacement));
+    await vi.waitFor(() =>
+      expect(instance.snapshot()).toMatchObject({
+        current: { id: replacement.id },
+        confidence: "confirmed",
+      }),
+    );
+    instance.applyRelay(runningSnapshot(replacement, "2026-08-27T12:10:00Z", "30"));
+    expect(fetchCurrent).toHaveBeenCalledTimes(3);
+  });
+
+  it("shares an active relay confirmation with an admitted command", async () => {
+    const original = entry({ id: "600", description: "Original" });
+    const replacement = entry({ id: "700", description: "Replacement" });
+    const confirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(original))
+      .mockImplementationOnce(() => confirmation.promise);
+    const stopTimeEntry = vi.fn(async (_workspaceId, entryId) =>
+      success(
+        entry({
+          id: entryId,
+          stop: "2026-08-27T12:11:00Z",
+          durationSeconds: 60,
+        }),
+      ),
+    );
+    const instance = coordinator(api({ fetchCurrent, stopTimeEntry }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(replacement, "2026-08-27T12:10:00Z", "30"));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(2));
+
+    const command = instance.toggle();
+    confirmation.resolve(success(replacement));
+
+    await expect(command).resolves.toMatchObject({ outcome: "stopped" });
+    expect(fetchCurrent).toHaveBeenCalledTimes(2);
+    expect(stopTimeEntry).toHaveBeenCalledWith(replacement.workspaceId, replacement.id);
+  });
+
+  it("does not hold a command behind confirmations for newer relay candidates", async () => {
+    const original = entry({ id: "600", description: "Original" });
+    const first = entry({ id: "700", description: "First candidate" });
+    const second = entry({ id: "800", description: "Second candidate" });
+    const latest = entry({ id: "900", description: "Latest candidate" });
+    const joined = deferred<ApiResult<RichTogglEntry | null>>();
+    const explicit = deferred<ApiResult<RichTogglEntry | null>>();
+    const trailing = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(original))
+      .mockImplementationOnce(() => joined.promise)
+      .mockImplementationOnce(() => explicit.promise)
+      .mockImplementationOnce(() => trailing.promise);
+    const stopTimeEntry = vi.fn();
+    const instance = coordinator(api({ fetchCurrent, stopTimeEntry }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(first, "2026-08-27T12:10:00Z", "30"));
+    const command = instance.toggle();
+    instance.applyRelay(runningSnapshot(second, "2026-08-27T12:10:01Z", "31"));
+    joined.resolve(success(first));
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(3));
+    instance.applyRelay(runningSnapshot(latest, "2026-08-27T12:10:02Z", "32"));
+    explicit.resolve(success(second));
+
+    await expect(command).resolves.toMatchObject({ outcome: "failed", error: "state_unconfirmed" });
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(4));
+    expect(stopTimeEntry).not.toHaveBeenCalled();
+    trailing.resolve(success(latest));
+    await instance.drain();
+    expect(instance.snapshot().current?.id).toBe(latest.id);
+  });
 
   it("accepts a newer relay echo after a successful create", async () => {
     const created = entry();
@@ -363,7 +856,106 @@ describe("client coordinator", () => {
     });
   });
 
-  it("rejects snapshots older than a successful REST current check", async () => {
+  it("does not re-arm a local create after its relay echo already arrived", async () => {
+    const created = entry();
+    const external = entry({ id: "700", description: "Later external timer" });
+    const creation = deferred<ApiResult<RichTogglEntry>>();
+    const fetchCurrent = vi.fn(async () => success(external));
+    const instance = coordinator(
+      api({ createRunningEntry: vi.fn(() => creation.promise), fetchCurrent }),
+    );
+
+    instance.applyRelay(idleSnapshot("2026-08-27T11:59:59Z", "19"));
+    const command = instance.resume();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("resuming"));
+    instance.applyRelay(runningSnapshot(created, "2026-08-27T12:00:01Z", "20"));
+    creation.resolve(success(created));
+    await command;
+
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "21"));
+    expect(instance.snapshot().current?.id).toBe(external.id);
+    expect(fetchCurrent).not.toHaveBeenCalled();
+  });
+
+  it("re-arms a local create fence when its relay echo predates a disconnect", async () => {
+    const created = entry();
+    const external = entry({ id: "700", description: "Delayed external timer" });
+    const creation = deferred<ApiResult<RichTogglEntry>>();
+    const confirmation = deferred<ApiResult<RichTogglEntry | null>>();
+    const fetchCurrent = vi.fn(() => confirmation.promise);
+    const instance = coordinator(
+      api({ createRunningEntry: vi.fn(() => creation.promise), fetchCurrent }),
+    );
+
+    const command = instance.resume();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("resuming"));
+    instance.applyRelay(runningSnapshot(created, "2026-08-27T12:00:01Z", "20"));
+    instance.setConnection("stale");
+    creation.resolve(success(created));
+    await command;
+    instance.setConnection("connected");
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "21"));
+
+    await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(1));
+    expect(instance.snapshot()).toMatchObject({
+      current: { id: created.id },
+      confidence: "uncertain",
+    });
+    confirmation.resolve(success(created));
+    await instance.drain();
+    expect(instance.snapshot().current?.id).toBe(created.id);
+  });
+
+  it("does not re-arm a local stop after its relay echo already arrived", async () => {
+    const original = entry();
+    const stopped = entry({
+      stop: "2026-08-27T12:10:00Z",
+      durationSeconds: 600,
+    });
+    const external = entry({ id: "700", description: "Later external timer" });
+    const stopResult = deferred<ApiResult<RichTogglEntry>>();
+    const fetchCurrent = vi.fn(async () => success(external));
+    const instance = coordinator(
+      api({ stopTimeEntry: vi.fn(() => stopResult.promise), fetchCurrent }),
+    );
+
+    instance.applyRelay(runningSnapshot(original, "2026-08-27T12:00:00Z", "19"));
+    const command = instance.stop();
+    await vi.waitFor(() => expect(instance.snapshot().pending).toBe("stopping"));
+    instance.applyRelay(idleSnapshot("2026-08-27T12:00:01Z", "20"));
+    instance.applyRelay(changed(stopped));
+    stopResult.resolve(success(stopped));
+    await command;
+
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "21"));
+    expect(instance.snapshot().current?.id).toBe(external.id);
+    expect(fetchCurrent).not.toHaveBeenCalled();
+  });
+
+  it("uses the matching echo cursor to accept a later realtime switch", async () => {
+    const created = entry();
+    const external = entry({
+      id: "700",
+      description: "Later external timer",
+      start: "2026-08-27T12:10:00Z",
+    });
+    const instance = coordinator(
+      api({
+        createRunningEntry: vi.fn(async () => success(created)),
+        fetchCurrent: vi.fn(async () => success(created)),
+      }),
+    );
+
+    await instance.resume();
+    instance.applyRelay(runningSnapshot(created, "2026-08-27T12:05:00Z", "20"));
+    await instance.reconcile("current");
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:05:00Z", "21"));
+    instance.applyRelay(changed(external, "created"));
+
+    expect(instance.snapshot().current?.id).toBe(external.id);
+  });
+
+  it("fences conflicting snapshots after a successful REST current check without comparing clocks", async () => {
     const current = entry({ id: "800", description: "REST current" });
     const instance = coordinator(api({ fetchCurrent: vi.fn(async () => success(current)) }), {
       connected: false,
@@ -371,9 +963,27 @@ describe("client coordinator", () => {
     });
 
     await expect(instance.reconcile("current")).resolves.toBe(true);
-    instance.applyRelay(idleSnapshot("2026-08-27T11:59:59Z"));
+    instance.applyRelay(idleSnapshot("2099-08-27T11:59:59Z"));
 
     expect(instance.snapshot().current?.id).toBe(current.id);
+  });
+
+  it("tombstones the prior current when REST confirms idle", async () => {
+    const current = entry({ id: "800", description: "REST current" });
+    const fetchCurrent = vi
+      .fn()
+      .mockResolvedValueOnce(success(current))
+      .mockResolvedValueOnce(success(null));
+    const instance = coordinator(api({ fetchCurrent }), {
+      connected: false,
+      confidence: "uncertain",
+    });
+
+    await instance.reconcile("current");
+    await instance.reconcile("current");
+    instance.applyRelay(runningSnapshot(current, "2099-08-27T11:59:59Z", "999"));
+
+    expect(instance.snapshot().current).toBeNull();
   });
 
   it("preserves an externally started timer across a late local stop result", async () => {
@@ -386,7 +996,8 @@ describe("client coordinator", () => {
 
     const command = instance.stop();
     await vi.waitFor(() => expect(instance.snapshot().pending).toBe("stopping"));
-    instance.applyRelay(runningSnapshot(external));
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "11"));
+    instance.applyRelay(changed(external, "created"));
     stopped.resolve(success(entry({ ...original, stop: now.toISOString(), durationSeconds: 1 })));
 
     await expect(command).resolves.toMatchObject({ outcome: "stopped" });
@@ -408,7 +1019,8 @@ describe("client coordinator", () => {
     instance.applyRelay(runningSnapshot(external));
     created.resolve(success(entry({ id: "303" })));
     await vi.waitFor(() => expect(fetchCurrent).toHaveBeenCalledTimes(1));
-    instance.applyRelay(runningSnapshot(newer));
+    instance.applyRelay(runningSnapshot(newer, "2026-08-27T12:00:02Z", "11"));
+    instance.applyRelay(changed(newer, "created"));
     reconciliation.resolve(success(external));
 
     await expect(command).resolves.toMatchObject({ outcome: "resumed" });
@@ -513,7 +1125,8 @@ describe("client coordinator", () => {
 
     const command = instance.stop();
     await vi.waitFor(() => expect(instance.snapshot().pending).toBe("stopping"));
-    instance.applyRelay(runningSnapshot(external));
+    instance.applyRelay(runningSnapshot(external, "2026-08-27T12:00:02Z", "11"));
+    instance.applyRelay(changed(external, "created"));
     current.resolve(success(null));
 
     await expect(command).resolves.toMatchObject({ outcome: "stopped", error: null });

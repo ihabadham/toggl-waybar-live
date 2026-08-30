@@ -197,6 +197,17 @@ describe("daemon integration", () => {
       await flushMicrotasks();
       expect(mocks.order).toContain("mutation_create_start");
 
+      const rejected = mocks.state.provider?.handle({
+        version: 1,
+        type: "resume",
+        presetId: preset.id,
+      });
+      await expect(rejected).resolves.toMatchObject({
+        outcome: "failed",
+        error: "command_busy",
+      });
+      expect(mocks.order.filter((event) => event === "mutation_create_start")).toHaveLength(1);
+
       let stopSettled = false;
       const stopping = daemon.stop().then(() => {
         stopSettled = true;
@@ -225,6 +236,7 @@ describe("daemon integration", () => {
       await stopping;
       await daemon.done;
       expect(stopSettled).toBe(true);
+      expect(mocks.order.filter((event) => event === "mutation_create_start")).toHaveLength(1);
       expect(mocks.order.at(-1)).toBe("runtime_publish_end");
     } finally {
       vi.useRealTimers();

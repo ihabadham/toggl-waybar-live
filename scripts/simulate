@@ -252,6 +252,9 @@ try {
     project_id: 404,
     project_name: "Internal",
     description: "Simulation",
+    billable: false,
+    tag_ids: [],
+    tags: [],
     start: startedAt,
     stop: null,
     duration: -1,
@@ -323,7 +326,7 @@ try {
   await waitForWorker();
   await waitFor("reconnected state", async () => (await readRuntimeState())?.connection === "connected", 5_000);
 
-  assert(fakeApiRequests === 2, `Simulation exceeded startup REST budget: ${fakeApiRequests}`);
+  assert(fakeApiRequests === 3, `Simulation exceeded relay confirmation budget: ${fakeApiRequests}`);
   assert(firstRenderer.exitCode === null && secondRenderer.exitCode === null, "A renderer exited early");
   process.stdout.write(
     `${JSON.stringify({

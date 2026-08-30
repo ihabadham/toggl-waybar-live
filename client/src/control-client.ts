@@ -9,10 +9,10 @@ import {
   commandResultSchema,
   controlSnapshotSchema,
 } from "./control-protocol.js";
+import { commandResponseTimeoutMilliseconds } from "./control-timing.js";
 import { runtimePaths } from "./runtime-path.js";
 
 const maximumFrameBytes = 64 * 1_024;
-const commandResponseTimeoutMilliseconds = 35_000;
 const maximumReconnectDelayMilliseconds = 5_000;
 
 type CommandRequest = Exclude<ControlRequest, { type: "watch" }>;

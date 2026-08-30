@@ -12,6 +12,7 @@ export const controlErrorCodeSchema = z.enum([
   "state_unconfirmed",
   "ambiguous_create",
   "preset_not_found",
+  "command_busy",
   "request_failed",
 ]);
 

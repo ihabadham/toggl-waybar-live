@@ -118,7 +118,14 @@ export function applyRelayMessage(
   const entries = new Map(state.entries);
   if (message.change.action === "deleted") {
     entries.delete(message.change.entry.id);
-    return { ...state, entries };
+    const deletedCurrent = state.current?.id === message.change.entry.id;
+    return {
+      ...state,
+      current: deletedCurrent ? null : state.current,
+      currentContributesToToday: deletedCurrent ? false : state.currentContributesToToday,
+      entries,
+      stoppedEntryIds: new Set([...state.stoppedEntryIds, message.change.entry.id]),
+    };
   }
 
   const entry = message.change.entry;

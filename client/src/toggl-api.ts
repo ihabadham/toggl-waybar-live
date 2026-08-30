@@ -5,6 +5,7 @@ import {
   rfc3339Schema,
 } from "@toggl-waybar-live/shared";
 
+import { togglRequestDeadlineMilliseconds } from "./control-timing.js";
 import type { DayWindow } from "./day-window.js";
 import type { ResumeActivity } from "./presets.js";
 
@@ -36,8 +37,6 @@ export interface RichTogglEntry extends NormalizedEntry {
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type RequestMethod = "GET" | "POST" | "PATCH";
 type UnknownRecord = Record<string, unknown>;
-
-const requestDeadlineMilliseconds = 10_000;
 
 interface RequestOptions<T> {
   body?: unknown;
@@ -164,7 +163,7 @@ export class TogglApi {
     apiToken: string,
     private readonly fetcher: Fetcher = fetch,
     private readonly baseUrl = "https://api.track.toggl.com",
-    private readonly deadlineMilliseconds = requestDeadlineMilliseconds,
+    private readonly deadlineMilliseconds = togglRequestDeadlineMilliseconds,
   ) {
     this.authorization = `Basic ${Buffer.from(`${apiToken}:api_token`, "utf8").toString("base64")}`;
   }
