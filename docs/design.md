@@ -7,7 +7,9 @@ Status: approved for implementation
 Show the current Toggl Track entry in Waybar with a locally advancing timer.
 Starting, editing, or stopping an entry should normally appear within seconds,
 without polling Toggl every second. When no entry is running, show today's
-tracked total.
+tracked total. Local controls can stop the trusted current entry or resume one
+of eight recent activities without sending credentials or mutations through
+Cloudflare.
 
 The first supported environment is Fedora, Sway, Waybar, and systemd user
 services. The core protocol and configuration must remain reusable without
@@ -16,7 +18,8 @@ building a generalized installer before the end-to-end path works.
 ## Non-goals for the first version
 
 - Replacing the Toggl desktop or web application.
-- Starting, stopping, or editing entries from Waybar.
+- Editing or deleting arbitrary entry details.
+- Switching activities through an automatic stop-then-start transaction.
 - Supporting multiple Toggl users through one relay deployment.
 - Storing time-entry history in Cloudflare.
 - Providing packages, automatic releases, or every init-system integration.
@@ -61,8 +64,10 @@ Durable Object -- latest snapshot and hibernating WebSocket fan-out
         |
         v
 Local daemon -- one connection, reconciliation, local derived state
-        |
-        +--> runtime state file <-- Waybar renderer on each output
+   ^    |    ^
+   |    |    +-- private control socket <-- local CLI <-- Waybar / Sway / Eww
+   |    +------> runtime state file <-- Waybar renderer on each output
+   +----------- Toggl REST reads and user-requested writes
 ```
 
 ### Cloudflare Worker
@@ -105,6 +110,8 @@ One systemd user service owns all network access. It:
 - maintains one authenticated WebSocket, regardless of Waybar output count;
 - fetches today's entries at startup and after a meaningful offline period;
 - maintains today's entry map and project-name cache locally;
+- serializes stop/resume commands received through a private Unix socket;
+- persists up to eight exact resume activities under the XDG state directory;
 - merges relay changes into the local derived state;
 - writes the renderer state atomically; and
 - reconnects with exponential backoff and jitter, capped at 60 seconds.
@@ -114,7 +121,7 @@ boundary, then sends explicit RFC 3339 bounds to Toggl. Timestamps remain UTC
 internally. This avoids incorrect totals around midnight and daylight-saving
 changes.
 
-### Waybar renderer
+### Local presentation and controls
 
 Each Waybar output runs one small, long-lived renderer. A renderer reads shared
 local state and emits Waybar JSON once per second. It performs no network
@@ -130,6 +137,13 @@ $XDG_RUNTIME_DIR/toggl-waybar-live/state.json
 The daemon updates it with write-then-rename semantics. Project metadata may be
 cached under `$XDG_CACHE_HOME/toggl-waybar-live/`; cache loss affects labels,
 not correctness of the running timer.
+
+The credential-free `toggl-waybar` CLI sends only fixed command names and
+validated preset UUIDs over `$XDG_RUNTIME_DIR/toggl-waybar-live/control.sock`.
+It supports toggle, stop, resume, and a reconnecting watch stream. Toggle
+confirms stale state before deciding whether to stop or resume. The optional
+Eww drawer consumes the watch projection and invokes the same CLI; it performs
+no network requests and receives no token.
 
 ## Toggl integration
 
@@ -154,6 +168,12 @@ second request is required because Toggl filters the list by entry start time;
 an entry that began before local midnight can still be running today. Results
 are merged by entry ID.
 
+Local stop uses Toggl's workspace-scoped stop endpoint. Resume creates a new
+entry containing the preset's workspace, description, project, task, tags, and
+billable status. There is no automatic stop-then-start operation and no blind
+retry when a create response is ambiguous. A later webhook is treated as an
+idempotent echo of the already-applied local result.
+
 ### Quota budget
 
 Healthy operation is push-driven. A full, two-request reconciliation is limited
@@ -170,6 +190,10 @@ client also reads `X-Toggl-Quota-Remaining` and `X-Toggl-Quota-Resets-In`, stops
 early when the budget is low, and honors Toggl's quota response instead of
 retrying. Project lookup is cached and requested only for an unknown project
 ID.
+
+Interactive writes are additional user-triggered requests, not part of the
+18-request disconnected fallback budget. Their quota headers feed the same
+gate, so background reconciliation yields when Toggl reports low capacity.
 
 ## Protocol and state
 
@@ -213,6 +237,14 @@ entry, today's entry map and total, cached display names, connection status,
 and synchronization timestamps. Only the renderer projection is written to the
 runtime file.
 
+The local control protocol is separately versioned and runtime-validated. Each
+socket connection sends one request; watch connections receive state snapshots
+until disconnected. Frames are capped at 64 KiB and the socket has mode `0600`.
+Resume presets are strict, atomic mode-`0600` JSON under
+`$XDG_STATE_HOME/toggl-waybar-live/`. Identity includes workspace,
+description, project, task, tags, and billable state; reusing one preserves its
+UUID and moves it to the MRU front.
+
 ## Security and data retention
 
 Secrets are separated by purpose:
@@ -227,6 +259,13 @@ No secret is accepted in a tracked configuration file, command argument, URL,
 or Waybar configuration. Examples contain unmistakable placeholders. Setup
 refuses empty values and known placeholders, writes local secret files with
 mode `0600`, and uses `wrangler secret put` for Cloudflare.
+
+The daemon is the only local process that reads the Toggl token. The CLI,
+Waybar, Sway commands, Eww configuration, control socket messages, renderer
+state, and preset file contain no credentials. User-controlled descriptions
+and labels remain data; only fixed commands and validated UUIDs cross command
+boundaries. Installer-owned files are atomically replaced, symlink targets are
+rejected, and wrappers refer to installed XDG bundles instead of a checkout.
 
 Webhook validation uses the raw body and a constant-time comparison. The
 Worker validates the signed `url_callback` against its configured callback and
@@ -250,6 +289,10 @@ descriptions, and secret material.
 | Corrupt runtime state | Renderer shows unavailable; daemon replaces it on the next valid projection |
 | Daemon crash | systemd restarts it; startup reconciliation restores local state |
 | Suspend/resume | WebSocket reconnect plus throttled reconciliation restores missed changes |
+| Daemon unavailable during a command | CLI exits nonzero; watch shows an actionable unavailable view and reconnects |
+| Stale state before toggle | Confirm the current entry once before choosing stop or resume |
+| Ambiguous create response | Check current once, block another resume if still uncertain, and never retry blindly |
+| Preset persistence failure | Preserve trusted timer state, report the failure, and do not write invalid preset data |
 
 The local service must never enter a tight retry loop. Network and parsing
 failures are observable in structured logs, while user-facing text remains
@@ -261,7 +304,8 @@ short.
 worker/       Cloudflare Worker and Durable Object
 client/       local daemon and Waybar renderer
 shared/       protocol schemas and shared types
-examples/     Waybar and systemd configurations
+eww/          optional dedicated drawer configuration
+examples/     Waybar, Sway, and systemd configurations
 docs/         design and operating documentation
 ```
 
@@ -284,6 +328,9 @@ caller or independent test seam requires one.
 - Local-day boundaries, duration math, and today-total updates.
 - Visible-label fallback, truncation, timer formatting, and stale classes.
 - Reconciliation throttling and quota-header behavior.
+- Preset identity, strict persistence, command ordering, and ambiguous writes.
+- Local socket framing, permissions, CLI grammar, and reconnecting watch state.
+- Drawer output selection and fixed command/config paths.
 
 ### Integration tests
 
@@ -297,8 +344,10 @@ caller or independent test seam requires one.
 ### End-to-end development path
 
 One development command starts the local Worker environment, fake Toggl API,
-daemon, and renderer. Signed fixtures exercise start, update, stop, deletion,
-invalid signature, and reconnect behavior while producing real Waybar JSON.
+daemon, two renderers, and a real socket watch. Signed fixtures and CLI commands
+exercise stop, resume-last, selected resume, webhook echoes, stale confirmation,
+an ambiguous create without retry, invalid signatures, and reconnect behavior
+while producing real Waybar JSON.
 
 Real-account acceptance then records evidence for:
 
@@ -326,9 +375,11 @@ Durable Objects, while GitHub Actions already verifies the complete local path.
 Runtime secrets are managed separately in Cloudflare and remain attached across
 code deployments.
 
-Packaging, automatic releases, multi-distribution installation, and a
-generalized setup wizard remain deferred. Worker code deployment is automated
-because the production path and rollback behavior are now established.
+OS packaging, automatic releases, multi-distribution installation, and a
+generalized setup wizard remain deferred. The local installer copies bundled
+artifacts to stable XDG paths without enabling services or editing desktop
+configuration. Worker code deployment is automated because the production path
+and rollback behavior are established.
 
 ## References
 

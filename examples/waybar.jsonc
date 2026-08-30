@@ -4,6 +4,11 @@
     "exec": "TOGGL_LABEL_MAX_CHARS=12 ~/.local/bin/toggl-waybar-render",
     "return-type": "json",
     "restart-interval": 5,
-    "tooltip": true
+    "tooltip": true,
+    "on-click": "~/.local/bin/toggl-waybar toggle",
+    // Portable default: the drawer follows the focused Sway workspace output.
+    "on-click-right": "~/.local/bin/toggl-waybar-drawer toggle"
+    // Exact click-output placement requires a separate Waybar block for each output:
+    // "on-click-right": "~/.local/bin/toggl-waybar-drawer toggle --output DP-1"
   }
 }

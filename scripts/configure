@@ -3,12 +3,13 @@
 set -eu
 umask 077
 
-for required_command in node npm openssl mktemp sed dirname mkdir rm chmod mv; do
+for required_command in node npm openssl mktemp sed dirname mkdir rm chmod mv cp; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'Required command not found: %s\n' "$required_command" >&2
     exit 1
   fi
 done
+
 node_binary=$(command -v node)
 case "$node_binary" in
   /*) ;;
@@ -25,24 +26,83 @@ config_directory=$config_root/toggl-waybar-live
 environment_file=$config_directory/env
 unit_directory=$config_root/systemd/user
 unit_file=$unit_directory/toggl-waybar-live.service
+data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}
+data_directory=$data_root/toggl-waybar-live
+client_directory=$data_directory/client
 binary_directory=${TOGGL_WAYBAR_BIN_DIR:-"$HOME/.local/bin"}
-case "$config_root$binary_directory" in
-  *[[:space:]]*)
-    printf 'Configuration and binary paths must not contain whitespace.\n' >&2
+
+if ! node -e '
+  const safePath = /^[A-Za-z0-9_./:@+=,-]+$/;
+  if (!process.argv.slice(1).every((value) => value.startsWith("/") && safePath.test(value))) {
+    process.exit(1);
+  }
+' "$config_root" "$data_root" "$binary_directory"; then
+  printf 'Configuration, data, and binary paths must be absolute and use safe path characters.\n' >&2
+  exit 1
+fi
+
+refuse_symlink() {
+  if [ -L "$1" ]; then
+    printf 'Refusing to use symlink: %s\n' "$1" >&2
     exit 1
-    ;;
-esac
+  fi
+}
+
+ensure_owned_directory() {
+  refuse_symlink "$1"
+  if [ -e "$1" ] && [ ! -d "$1" ]; then
+    printf 'Expected a directory: %s\n' "$1" >&2
+    exit 1
+  fi
+  mkdir -p "$1"
+  refuse_symlink "$1"
+  chmod 0700 "$1"
+}
+
+stage_copy() {
+  source_file=$1
+  target_file=$2
+  mode=$3
+  if [ ! -f "$source_file" ] || [ -L "$source_file" ]; then
+    printf 'Build artifact is missing or unsafe: %s\n' "$source_file" >&2
+    exit 1
+  fi
+  refuse_symlink "$target_file"
+  target_parent=$(dirname -- "$target_file")
+  target_name=${target_file##*/}
+  staged_file=$(mktemp "$target_parent/.$target_name.XXXXXX")
+  if ! cp "$source_file" "$staged_file" || ! chmod "$mode" "$staged_file"; then
+    rm -f "$staged_file"
+    exit 1
+  fi
+  printf '%s\n' "$staged_file"
+}
+
+replace_file() {
+  refuse_symlink "$2"
+  mv -f "$1" "$2"
+}
+
+shell_quote() {
+  quoted_value=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$quoted_value"
+}
+
 for target in \
   "$environment_file" \
   "$unit_file" \
+  "$client_directory/daemon.mjs" \
+  "$client_directory/renderer.mjs" \
+  "$client_directory/toggl-waybar.mjs" \
   "$binary_directory/toggl-waybar-daemon" \
-  "$binary_directory/toggl-waybar-render"
+  "$binary_directory/toggl-waybar-render" \
+  "$binary_directory/toggl-waybar"
 do
-  if [ -L "$target" ]; then
-    printf 'Refusing to replace symlink: %s\n' "$target" >&2
-    exit 1
-  fi
+  refuse_symlink "$target"
 done
+refuse_symlink "$config_directory"
+refuse_symlink "$data_directory"
+refuse_symlink "$client_directory"
 
 printf 'Relay WebSocket URL (wss://.../ws): '
 IFS= read -r relay_url
@@ -68,6 +128,7 @@ case "$relay_url" in
     exit 1
     ;;
 esac
+
 printf 'IANA timezone (for example Africa/Cairo): '
 IFS= read -r timezone
 case "$timezone" in
@@ -119,12 +180,32 @@ esac
 printf 'Building the local client...\n'
 (cd "$repository_root" && npm run build -w shared && npm run build -w client)
 
-mkdir -p "$config_directory" "$unit_directory" "$binary_directory"
+ensure_owned_directory "$config_directory"
+mkdir -p "$unit_directory" "$binary_directory" "$data_root"
+ensure_owned_directory "$data_directory"
+ensure_owned_directory "$client_directory"
+
 environment_temporary=$(mktemp "$config_directory/.env.XXXXXX")
-unit_temporary=$(mktemp "$unit_directory/.service.XXXXXX")
-daemon_temporary=$(mktemp "$binary_directory/.daemon.XXXXXX")
-renderer_temporary=$(mktemp "$binary_directory/.renderer.XXXXXX")
-trap 'rm -f "$environment_temporary" "$unit_temporary" "$daemon_temporary" "$renderer_temporary"' EXIT HUP INT TERM
+unit_temporary=$(mktemp "$unit_directory/.toggl-waybar-live.service.XXXXXX")
+daemon_wrapper_temporary=$(mktemp "$binary_directory/.toggl-waybar-daemon.XXXXXX")
+renderer_wrapper_temporary=$(mktemp "$binary_directory/.toggl-waybar-render.XXXXXX")
+cli_wrapper_temporary=$(mktemp "$binary_directory/.toggl-waybar.XXXXXX")
+daemon_bundle_temporary=
+renderer_bundle_temporary=
+cli_bundle_temporary=
+
+cleanup() {
+  rm -f \
+    "${environment_temporary:-}" \
+    "${unit_temporary:-}" \
+    "${daemon_wrapper_temporary:-}" \
+    "${renderer_wrapper_temporary:-}" \
+    "${cli_wrapper_temporary:-}" \
+    "${daemon_bundle_temporary:-}" \
+    "${renderer_bundle_temporary:-}" \
+    "${cli_bundle_temporary:-}"
+}
+trap cleanup EXIT HUP INT TERM
 
 {
   printf 'TOGGL_API_TOKEN=%s\n' "$api_token"
@@ -148,25 +229,53 @@ trap 'rm -f "$environment_temporary" "$unit_temporary" "$daemon_temporary" "$ren
   printf '%s\n' 'WantedBy=graphical-session.target'
 } >"$unit_temporary"
 
+node_command=$(shell_quote "$node_binary")
 {
   printf '%s\n' '#!/bin/sh'
-  printf 'exec "%s" "%s/client/dist/daemon.js" "$@"\n' "$node_binary" "$repository_root"
-} >"$daemon_temporary"
-
+  printf 'exec %s %s "$@"\n' "$node_command" "$(shell_quote "$client_directory/daemon.mjs")"
+} >"$daemon_wrapper_temporary"
 {
   printf '%s\n' '#!/bin/sh'
-  printf 'exec "%s" "%s/client/dist/renderer.js" "$@"\n' "$node_binary" "$repository_root"
-} >"$renderer_temporary"
+  printf 'exec %s %s "$@"\n' "$node_command" "$(shell_quote "$client_directory/renderer.mjs")"
+} >"$renderer_wrapper_temporary"
+{
+  printf '%s\n' '#!/bin/sh'
+  printf 'exec %s %s "$@"\n' "$node_command" "$(shell_quote "$client_directory/toggl-waybar.mjs")"
+} >"$cli_wrapper_temporary"
 
 chmod 0600 "$environment_temporary"
 chmod 0644 "$unit_temporary"
-chmod 0755 "$daemon_temporary" "$renderer_temporary"
-mv -f "$environment_temporary" "$environment_file"
-mv -f "$unit_temporary" "$unit_file"
-mv -f "$daemon_temporary" "$binary_directory/toggl-waybar-daemon"
-mv -f "$renderer_temporary" "$binary_directory/toggl-waybar-render"
+chmod 0755 "$daemon_wrapper_temporary" "$renderer_wrapper_temporary" "$cli_wrapper_temporary"
+
+daemon_bundle_temporary=$(stage_copy \
+  "$repository_root/client/dist/runtime/daemon.mjs" \
+  "$client_directory/daemon.mjs" 0644)
+renderer_bundle_temporary=$(stage_copy \
+  "$repository_root/client/dist/runtime/renderer.mjs" \
+  "$client_directory/renderer.mjs" 0644)
+cli_bundle_temporary=$(stage_copy \
+  "$repository_root/client/dist/runtime/toggl-waybar.mjs" \
+  "$client_directory/toggl-waybar.mjs" 0644)
+
+replace_file "$daemon_bundle_temporary" "$client_directory/daemon.mjs"
+daemon_bundle_temporary=
+replace_file "$renderer_bundle_temporary" "$client_directory/renderer.mjs"
+renderer_bundle_temporary=
+replace_file "$cli_bundle_temporary" "$client_directory/toggl-waybar.mjs"
+cli_bundle_temporary=
+replace_file "$environment_temporary" "$environment_file"
+environment_temporary=
+replace_file "$unit_temporary" "$unit_file"
+unit_temporary=
+replace_file "$daemon_wrapper_temporary" "$binary_directory/toggl-waybar-daemon"
+daemon_wrapper_temporary=
+replace_file "$renderer_wrapper_temporary" "$binary_directory/toggl-waybar-render"
+renderer_wrapper_temporary=
+replace_file "$cli_wrapper_temporary" "$binary_directory/toggl-waybar"
+cli_wrapper_temporary=
 trap - EXIT HUP INT TERM
 
-printf 'Installed local config, user service, and launchers.\n'
+printf 'Installed bundled core commands, private config, and the user service.\n'
 printf 'Relay token was generated or preserved without being printed.\n'
+printf 'The service was not enabled or restarted.\n'
 printf 'Next: configure Cloudflare, then enable the user service and add the Waybar module.\n'

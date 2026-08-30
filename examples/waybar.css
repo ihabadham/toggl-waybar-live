@@ -26,6 +26,13 @@
   background-color: rgba(214, 168, 79, 0.1);
 }
 
+#custom-toggl.stopping,
+#custom-toggl.resuming {
+  color: #e1bc83;
+  background-color: rgba(119, 79, 52, 0.28);
+  border-bottom-color: rgba(225, 188, 131, 0.55);
+}
+
 #custom-toggl.offline {
   padding-right: 8px;
   color: #937a5c;

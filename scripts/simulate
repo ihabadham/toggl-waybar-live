@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,10 +14,19 @@ const webhookSecret = "simulation-webhook-secret";
 const apiToken = "simulation-api-token";
 const targetUserId = "303";
 const children = new Set();
-const temporaryRoot = await mkdtemp(join(tmpdir(), "toggl-waybar-live-simulation-"));
-let fakeApiRequests = 0;
+const temporaryRoot = await mkdtemp(join(tmpdir(), "twl-sim-"));
+const outsideDirectory = join(temporaryRoot, "outside-repository");
+await mkdir(outsideDirectory);
+
+let fakeApiReads = 0;
+let fakeApiWrites = 0;
 let currentEntry = null;
 let todayEntries = [];
+let nextEntryId = 1_000;
+let failNextCurrentRead = false;
+let failNextCreateAmbiguously = false;
+const createRequests = [];
+const stopRequests = [];
 
 function assert(condition, message) {
   if (!condition) {
@@ -74,28 +83,124 @@ async function cleanup() {
 process.once("SIGINT", () => void cleanup().finally(() => process.exit(130)));
 process.once("SIGTERM", () => void cleanup().finally(() => process.exit(143)));
 
-const fakeApiPort = await unusedPort();
-const workerPort = await unusedPort();
-const fakeApi = createServer((request, response) => {
-  fakeApiRequests += 1;
+async function requestJson(request) {
+  const chunks = [];
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function json(response, status, value) {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(value));
+}
+
+function replaceTodayEntry(entry) {
+  const index = todayEntries.findIndex((candidate) => String(candidate.id) === String(entry.id));
+  if (index === -1) {
+    todayEntries.push(entry);
+  } else {
+    todayEntries[index] = entry;
+  }
+}
+
+async function handleFakeApi(request, response) {
+  if (request.method === "GET") {
+    fakeApiReads += 1;
+  } else if (request.method === "POST" || request.method === "PATCH") {
+    fakeApiWrites += 1;
+  }
+
   const expectedAuthorization = `Basic ${Buffer.from(`${apiToken}:api_token`).toString("base64")}`;
   if (request.headers.authorization !== expectedAuthorization) {
-    response.writeHead(401).end();
+    json(response, 401, { error: "unauthorized" });
     return;
   }
 
-  response.setHeader("content-type", "application/json");
-  response.setHeader("x-toggl-quota-remaining", "28");
+  response.setHeader("x-toggl-quota-remaining", "90");
   response.setHeader("x-toggl-quota-resets-in", "1800");
-  if (request.url?.startsWith("/api/v9/me/time_entries?")) {
-    response.end(JSON.stringify(todayEntries));
+  if (request.method === "GET" && request.url?.startsWith("/api/v9/me/time_entries?")) {
+    json(response, 200, todayEntries);
     return;
   }
-  if (request.url === "/api/v9/me/time_entries/current") {
-    response.end(JSON.stringify({ data: currentEntry }));
+  if (request.method === "GET" && request.url === "/api/v9/me/time_entries/current") {
+    if (failNextCurrentRead) {
+      failNextCurrentRead = false;
+      json(response, 500, { error: "ambiguous_current" });
+      return;
+    }
+    json(response, 200, { data: currentEntry });
     return;
   }
-  response.writeHead(404).end(JSON.stringify({ error: "not_found" }));
+
+  const createMatch = request.url?.match(/^\/api\/v9\/workspaces\/(\d+)\/time_entries$/);
+  if (request.method === "POST" && createMatch) {
+    const body = await requestJson(request);
+    createRequests.push({ url: request.url, body });
+    if (failNextCreateAmbiguously) {
+      failNextCreateAmbiguously = false;
+      json(response, 500, { error: "ambiguous_create" });
+      return;
+    }
+    const entry = {
+      id: nextEntryId++,
+      workspace_id: body.workspace_id,
+      user_id: Number(targetUserId),
+      project_id: body.project_id ?? null,
+      project_name: body.project_id === 405 ? "Client" : "Internal",
+      task_id: body.task_id ?? null,
+      task_name: body.task_id === 505 ? "Preparation" : null,
+      description: body.description,
+      tag_ids: body.tag_ids,
+      tags: body.tags,
+      billable: body.billable,
+      start: body.start,
+      stop: null,
+      duration: -1,
+      at: body.start,
+    };
+    currentEntry = entry;
+    replaceTodayEntry(entry);
+    createRequests.at(-1).entry = entry;
+    json(response, 200, { data: entry });
+    return;
+  }
+
+  const stopMatch = request.url?.match(
+    /^\/api\/v9\/workspaces\/(\d+)\/time_entries\/(\d+)\/stop$/,
+  );
+  if (request.method === "PATCH" && stopMatch) {
+    if (currentEntry === null || String(currentEntry.id) !== stopMatch[2]) {
+      json(response, 409, { error: "already_stopped" });
+      return;
+    }
+    const stoppedAt = new Date().toISOString();
+    const stoppedEntry = {
+      ...currentEntry,
+      stop: stoppedAt,
+      duration: Math.max(
+        0,
+        Math.floor((Date.parse(stoppedAt) - Date.parse(currentEntry.start)) / 1_000),
+      ),
+      at: stoppedAt,
+    };
+    currentEntry = null;
+    replaceTodayEntry(stoppedEntry);
+    stopRequests.push({ url: request.url, entry: stoppedEntry });
+    json(response, 200, { data: stoppedEntry });
+    return;
+  }
+
+  json(response, 404, { error: "not_found" });
+}
+
+const fakeApiPort = await unusedPort();
+const workerPort = await unusedPort();
+const fakeApi = createServer((request, response) => {
+  void handleFakeApi(request, response).catch((error) => {
+    json(response, 500, { error: error instanceof Error ? error.message : "fake_api_failed" });
+  });
 });
 await new Promise((resolveListen) => fakeApi.listen(fakeApiPort, "127.0.0.1", resolveListen));
 
@@ -123,13 +228,12 @@ const workerArguments = [
 ];
 
 function startWorker() {
-  const child = track(
+  return track(
     spawn(join(repositoryRoot, "node_modules/.bin/wrangler"), workerArguments, {
       cwd: repositoryRoot,
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );
-  return child;
 }
 
 async function waitForWorker() {
@@ -148,18 +252,14 @@ async function waitForWorker() {
 
 const runtimeEnvironment = {
   ...process.env,
-  XDG_RUNTIME_DIR: join(temporaryRoot, "runtime"),
+  XDG_RUNTIME_DIR: join(temporaryRoot, "r"),
+  XDG_STATE_HOME: join(temporaryRoot, "state"),
 };
 const rendererLines = [[], []];
+const watchLines = [];
+let watchStderr = "";
 
-function startRenderer(index) {
-  const child = track(
-    spawn(process.execPath, [join(repositoryRoot, "client/dist/renderer.js")], {
-      cwd: repositoryRoot,
-      env: { ...runtimeEnvironment, TOGGL_LABEL_MAX_CHARS: "12" },
-      stdio: ["ignore", "pipe", "pipe"],
-    }),
-  );
+function collectJsonLines(child, target) {
   child.stdout.setEncoding("utf8");
   let buffered = "";
   child.stdout.on("data", (chunk) => {
@@ -168,11 +268,62 @@ function startRenderer(index) {
     buffered = lines.pop() ?? "";
     for (const line of lines) {
       if (line) {
-        rendererLines[index].push(JSON.parse(line));
+        target.push(JSON.parse(line));
       }
     }
   });
+}
+
+function startRenderer(index) {
+  const child = track(
+    spawn(process.execPath, [join(repositoryRoot, "client/dist/renderer.js")], {
+      cwd: outsideDirectory,
+      env: { ...runtimeEnvironment, TOGGL_LABEL_MAX_CHARS: "12" },
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
+  collectJsonLines(child, rendererLines[index]);
   return child;
+}
+
+function startWatch() {
+  const child = track(
+    spawn(process.execPath, [join(repositoryRoot, "client/dist/control-cli.js"), "watch"], {
+      cwd: outsideDirectory,
+      env: runtimeEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
+  collectJsonLines(child, watchLines);
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    watchStderr += chunk;
+  });
+  return child;
+}
+
+function runCli(...arguments_) {
+  return new Promise((resolveCommand, rejectCommand) => {
+    const child = track(
+      spawn(process.execPath, [join(repositoryRoot, "client/dist/control-cli.js"), ...arguments_], {
+        cwd: outsideDirectory,
+        env: runtimeEnvironment,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", rejectCommand);
+    child.once("close", (exitCode) => resolveCommand({ exitCode, stdout, stderr }));
+  });
 }
 
 function latestRendererText(index) {
@@ -183,10 +334,17 @@ function latestRendererHasClass(index, className) {
   return rendererLines[index].at(-1)?.class?.includes(className) ?? false;
 }
 
+function latestWatch() {
+  return watchLines.at(-1) ?? null;
+}
+
 async function readRuntimeState() {
   try {
     return JSON.parse(
-      await readFile(join(runtimeEnvironment.XDG_RUNTIME_DIR, "toggl-waybar-live/state.json"), "utf8"),
+      await readFile(
+        join(runtimeEnvironment.XDG_RUNTIME_DIR, "toggl-waybar-live/state.json"),
+        "utf8",
+      ),
     );
   } catch {
     return null;
@@ -216,17 +374,40 @@ async function sendWebhook(requestType, payload, signatureSecret = webhookSecret
   });
 }
 
+const now = new Date().toISOString();
+const planningEntry = {
+  id: 91,
+  workspace_id: 202,
+  user_id: 303,
+  project_id: 405,
+  project_name: "Client",
+  task_id: 505,
+  task_name: "Preparation",
+  description: "Planning",
+  tag_ids: [606],
+  tags: ["focused"],
+  billable: true,
+  start: now,
+  stop: now,
+  duration: 60,
+  at: now,
+};
+todayEntries = [planningEntry];
+
 let worker;
 let daemon;
 let firstRenderer;
 let secondRenderer;
+let watcher;
+let daemonStdout = "";
+let daemonStderr = "";
 try {
   worker = startWorker();
   await waitForWorker();
 
   daemon = track(
     spawn(process.execPath, [join(repositoryRoot, "client/dist/daemon.js")], {
-      cwd: repositoryRoot,
+      cwd: outsideDirectory,
       env: {
         ...runtimeEnvironment,
         TOGGL_API_TOKEN: apiToken,
@@ -238,29 +419,59 @@ try {
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );
-  await waitFor("daemon connection", async () => (await readRuntimeState())?.connection === "connected", 5_000);
-  assert(fakeApiRequests === 2, `Expected 2 startup Toggl requests, received ${fakeApiRequests}`);
+  daemon.stdout.setEncoding("utf8");
+  daemon.stderr.setEncoding("utf8");
+  daemon.stdout.on("data", (chunk) => {
+    daemonStdout += chunk;
+  });
+  daemon.stderr.on("data", (chunk) => {
+    daemonStderr += chunk;
+  });
+  try {
+    await waitFor(
+      "daemon connection",
+      async () => (await readRuntimeState())?.connection === "connected",
+      5_000,
+    );
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : "Daemon startup failed"}; exit=${daemon.exitCode}; stdout=${daemonStdout.trim()}; stderr=${daemonStderr.trim()}`,
+    );
+  }
+  assert(fakeApiReads === 2, `Expected 2 startup Toggl reads, received ${fakeApiReads}`);
+  assert(fakeApiWrites === 0, `Startup made ${fakeApiWrites} unexpected Toggl writes`);
 
   firstRenderer = startRenderer(0);
   secondRenderer = startRenderer(1);
+  watcher = startWatch();
+  try {
+    await waitFor("initial watch snapshot", () => latestWatch()?.presets?.length === 1);
+  } catch (error) {
+    const runtimeFiles = await readdir(join(runtimeEnvironment.XDG_RUNTIME_DIR, "toggl-waybar-live"));
+    throw new Error(
+      `${error instanceof Error ? error.message : "Watch startup failed"}; watchExit=${watcher.exitCode}; daemonExit=${daemon.exitCode}; runtimeFiles=${runtimeFiles.join(",")}; latest=${JSON.stringify(latestWatch())}; watchStderr=${watchStderr.trim()}; daemonStdout=${daemonStdout.trim()}; daemonStderr=${daemonStderr.trim()}`,
+    );
+  }
 
-  const startedAt = new Date(Date.now() - 2_000).toISOString();
   const runningEntry = {
     id: 101,
     workspace_id: 202,
     user_id: 303,
     project_id: 404,
     project_name: "Internal",
+    task_id: null,
+    task_name: null,
     description: "Simulation",
+    tag_ids: [707],
+    tags: ["review"],
     billable: false,
-    tag_ids: [],
-    tags: [],
-    start: startedAt,
+    start: new Date().toISOString(),
     stop: null,
     duration: -1,
+    at: new Date().toISOString(),
   };
   currentEntry = runningEntry;
-  todayEntries = [runningEntry];
+  replaceTodayEntry(runningEntry);
   const startResponse = await sendWebhook("POST", runningEntry);
   assert(startResponse.status === 204, `Start webhook returned ${startResponse.status}`);
 
@@ -269,16 +480,20 @@ try {
     () =>
       rendererLines.every(
         (_lines, index) =>
-          latestRendererHasClass(index, "running") && latestRendererText(index).includes("Simulation"),
+          latestRendererHasClass(index, "running") &&
+          latestRendererText(index).includes("Simulation"),
       ),
   );
+  await waitFor("watch running state", () => latestWatch()?.current?.label === "Simulation");
   const beforeTick = rendererLines.map((_lines, index) => latestRendererText(index));
-  const requestsBeforeTick = fakeApiRequests;
+  const readsBeforeTick = fakeApiReads;
+  const writesBeforeTick = fakeApiWrites;
   await waitFor(
     "both local timer increments",
     () => rendererLines.every((_lines, index) => latestRendererText(index) !== beforeTick[index]),
   );
-  assert(fakeApiRequests === requestsBeforeTick, "Timer tick made an unexpected Toggl request");
+  assert(fakeApiReads === readsBeforeTick, "Timer tick made an unexpected Toggl read");
+  assert(fakeApiWrites === writesBeforeTick, "Timer tick made an unexpected Toggl write");
 
   const invalidResponse = await sendWebhook(
     "PATCH",
@@ -292,48 +507,114 @@ try {
     "Invalid HMAC changed renderer state",
   );
 
-  const stoppedAt = new Date().toISOString();
-  const stoppedEntry = {
-    ...runningEntry,
-    stop: stoppedAt,
-    duration: Math.max(0, Math.floor((Date.parse(stoppedAt) - Date.parse(startedAt)) / 1_000)),
-  };
-  currentEntry = null;
-  todayEntries = [stoppedEntry];
-  const stopResponse = await sendWebhook("PATCH", stoppedEntry);
-  assert(stopResponse.status === 204, `Stop webhook returned ${stopResponse.status}`);
+  let readsBeforeCommand = fakeApiReads;
+  let writesBeforeCommand = fakeApiWrites;
+  const stopResult = await runCli("stop");
+  assert(stopResult.exitCode === 0, `Socket stop failed: ${stopResult.stderr}`);
+  assert(fakeApiReads === readsBeforeCommand, "Trusted stop made an unexpected Toggl read");
+  assert(fakeApiWrites === writesBeforeCommand + 1, "Stop did not make exactly one Toggl write");
+  assert(stopRequests.at(-1)?.url === "/api/v9/workspaces/202/time_entries/101/stop", "Stop used the wrong Toggl route");
+  const firstStoppedEntry = stopRequests.at(-1).entry;
+  const stopEcho = await sendWebhook("PATCH", firstStoppedEntry);
+  assert(stopEcho.status === 204, `Stop webhook echo returned ${stopEcho.status}`);
   await waitFor(
-    "both idle renderers",
-    () => rendererLines.every((_lines, index) => latestRendererHasClass(index, "idle")),
+    "idle state after socket stop",
+    () => latestWatch()?.status === "idle" && latestWatch()?.presets?.length === 2,
   );
 
-  todayEntries = [];
-  const deleteResponse = await sendWebhook("DELETE", { id: 101, wid: 202, uid: 303 });
-  assert(deleteResponse.status === 204, `Delete webhook returned ${deleteResponse.status}`);
-  await waitFor(
-    "deleted entry total",
-    () =>
-      rendererLines.every(
-        (_lines, index) =>
-          latestRendererHasClass(index, "idle") && latestRendererText(index).includes("00:00:00"),
-      ),
-  );
+  writesBeforeCommand = fakeApiWrites;
+  const resumeLastResult = await runCli("resume");
+  assert(resumeLastResult.exitCode === 0, `Resume-last failed: ${resumeLastResult.stderr}`);
+  assert(fakeApiWrites === writesBeforeCommand + 1, "Resume-last did not make one Toggl write");
+  const resumeLastRequest = createRequests.at(-1);
+  assert(resumeLastRequest.body.description === "Simulation", "Resume-last chose the wrong preset");
+  assert(resumeLastRequest.body.created_with === "toggl-waybar-live", "Resume-last omitted created_with");
+  assert(resumeLastRequest.url === "/api/v9/workspaces/202/time_entries", "Resume-last used the wrong Toggl route");
+  const resumeLastEcho = await sendWebhook("POST", resumeLastRequest.entry);
+  assert(resumeLastEcho.status === 204, `Resume-last webhook echo returned ${resumeLastEcho.status}`);
+  await waitFor("resume-last watch state", () => latestWatch()?.current?.label === "Simulation");
+
+  const stopResumedResult = await runCli("stop");
+  assert(stopResumedResult.exitCode === 0, `Stopping resumed timer failed: ${stopResumedResult.stderr}`);
+  await waitFor("idle before selected resume", () => latestWatch()?.status === "idle");
+  const planningPreset = latestWatch()?.presets?.find((preset) => preset.label === "Planning");
+  assert(planningPreset, "Selected-resume preset was not present in the watch view");
+
+  writesBeforeCommand = fakeApiWrites;
+  const resumeSelectedResult = await runCli("resume", planningPreset.id);
+  assert(resumeSelectedResult.exitCode === 0, `Resume-selected failed: ${resumeSelectedResult.stderr}`);
+  assert(fakeApiWrites === writesBeforeCommand + 1, "Resume-selected did not make one Toggl write");
+  const resumeSelectedRequest = createRequests.at(-1);
+  assert(resumeSelectedRequest.body.description === "Planning", "Resume-selected chose the wrong preset");
+  assert(resumeSelectedRequest.body.project_id === 405, "Resume-selected lost its project");
+  assert(resumeSelectedRequest.body.task_id === 505, "Resume-selected lost its task");
+  assert(resumeSelectedRequest.body.billable === true, "Resume-selected lost billable state");
+  const selectedEcho = await sendWebhook("POST", resumeSelectedRequest.entry);
+  assert(selectedEcho.status === 204, `Resume-selected webhook echo returned ${selectedEcho.status}`);
+  await waitFor("selected resume watch state", () => latestWatch()?.current?.label === "Planning");
 
   await terminate(worker);
   worker = null;
   await waitFor("stale state", async () => (await readRuntimeState())?.connection === "stale", 5_000);
+  readsBeforeCommand = fakeApiReads;
+  writesBeforeCommand = fakeApiWrites;
+  const staleToggleResult = await runCli("toggle");
+  assert(staleToggleResult.exitCode === 0, `Stale-state toggle failed: ${staleToggleResult.stderr}`);
+  assert(fakeApiReads === readsBeforeCommand + 1, "Stale toggle did not confirm current state once");
+  assert(fakeApiWrites === writesBeforeCommand + 1, "Stale toggle did not stop exactly once");
+  const staleStopEntry = stopRequests.at(-1).entry;
+
   worker = startWorker();
   await waitForWorker();
-  await waitFor("reconnected state", async () => (await readRuntimeState())?.connection === "connected", 5_000);
+  await waitFor(
+    "reconnected state",
+    async () => (await readRuntimeState())?.connection === "connected",
+    5_000,
+  );
+  const staleStopEcho = await sendWebhook("PATCH", staleStopEntry);
+  assert(staleStopEcho.status === 204, `Stale-stop webhook echo returned ${staleStopEcho.status}`);
+  await waitFor("idle after stale-stop echo", () => latestWatch()?.status === "idle");
 
-  assert(fakeApiRequests === 3, `Simulation exceeded relay confirmation budget: ${fakeApiRequests}`);
+  failNextCreateAmbiguously = true;
+  failNextCurrentRead = true;
+  readsBeforeCommand = fakeApiReads;
+  writesBeforeCommand = fakeApiWrites;
+  const ambiguousResult = await runCli("resume", planningPreset.id);
+  assert(ambiguousResult.exitCode === 1, "Ambiguous create unexpectedly succeeded");
+  assert(ambiguousResult.stderr.includes("ambiguous_create"), "Ambiguous create was not reported");
+  assert(fakeApiWrites === writesBeforeCommand + 1, "Ambiguous create was blindly retried");
+  assert(fakeApiReads === readsBeforeCommand + 1, "Ambiguous create did not reconcile exactly once");
+  await waitFor("ambiguous watch error", () => latestWatch()?.error?.includes("may have started"));
+
+  const writesBeforeBlockedResume = fakeApiWrites;
+  const readsBeforeBlockedResume = fakeApiReads;
+  const blockedResume = await runCli("resume", planningPreset.id);
+  assert(blockedResume.exitCode === 1, "Resume was not blocked after an ambiguous create");
+  assert(fakeApiWrites === writesBeforeBlockedResume, "Blocked resume made another Toggl write");
+  assert(fakeApiReads === readsBeforeBlockedResume, "Blocked resume made an unexpected Toggl read");
+
   assert(firstRenderer.exitCode === null && secondRenderer.exitCode === null, "A renderer exited early");
+  assert(watcher.exitCode === null, "The socket watch exited early");
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
       renderers: 2,
-      fakeTogglRequests: fakeApiRequests,
-      assertions: ["running", "local_tick", "stop", "invalid_hmac", "delete", "reconnect"],
+      fakeTogglReads: fakeApiReads,
+      fakeTogglWrites: fakeApiWrites,
+      createRequests: createRequests.length,
+      stopRequests: stopRequests.length,
+      assertions: [
+        "local_tick",
+        "invalid_hmac",
+        "socket_watch",
+        "stop",
+        "resume_last",
+        "resume_selected",
+        "webhook_echoes",
+        "stale_confirmation",
+        "ambiguous_create_no_retry",
+        "reconnect",
+      ],
     })}\n`,
   );
 } finally {
