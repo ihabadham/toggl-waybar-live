@@ -15,6 +15,10 @@ $border: rgba(213, 143, 171, 0.22);
   font-size: 13px;
 }
 
+window {
+  background-color: transparent;
+}
+
 .toggl-overlay,
 .drawer-backdrop {
   background-color: transparent;
@@ -32,7 +36,6 @@ $border: rgba(213, 143, 171, 0.22);
 }
 
 .toggl-panel {
-  min-width: 360px;
   padding: 20px 18px 16px;
   border-left: 1px solid $border;
   background-color: $surface;

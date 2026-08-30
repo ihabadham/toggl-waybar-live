@@ -18,6 +18,9 @@ await Promise.all(
   Object.entries(entries).map(([outputName, entryName]) =>
     build({
       absWorkingDir: clientDirectory,
+      banner: {
+        js: 'import { createRequire as __togglCreateRequire } from "node:module"; const require = __togglCreateRequire(import.meta.url);',
+      },
       bundle: true,
       entryPoints: [`src/${entryName}`],
       format: "esm",

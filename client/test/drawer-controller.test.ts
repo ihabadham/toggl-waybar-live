@@ -153,6 +153,47 @@ describe("drawer controller", () => {
     expect(errors.join("")).toContain("could not open window");
   });
 
+  it("cleans up a created overlay after reveal failure without hiding the original error", async () => {
+    const { calls, dependencies, errors } = harness([
+      commandResult(),
+      commandResult({ exitCode: 1, stderr: "reveal failed" }),
+      commandResult({ exitCode: 1, stderr: "cleanup close failed" }),
+      commandResult({ exitCode: 1, stderr: "cleanup mode failed" }),
+    ]);
+
+    expect(await runDrawerController(["open", "--output", "DP-1"], dependencies)).toBe(1);
+    expect(calls).toEqual([
+      {
+        command: "eww",
+        arguments: [
+          "--config",
+          configDirectory,
+          "open",
+          "toggl-drawer",
+          "--id",
+          "toggl-drawer",
+          "--screen",
+          "DP-1",
+        ],
+      },
+      {
+        command: "eww",
+        arguments: ["--config", configDirectory, "update", "drawer_revealed=true"],
+      },
+      {
+        command: "eww",
+        arguments: ["--config", configDirectory, "close", "toggl-drawer"],
+      },
+      { command: "swaymsg", arguments: ["mode", "default"] },
+    ]);
+    expect(errors.join("\n")).toContain("reveal failed");
+    expect(errors.join("\n")).toContain("cleanup close failed");
+    expect(errors.join("\n")).toContain("cleanup mode failed");
+    expect(errors.join("\n").indexOf("reveal failed")).toBeLessThan(
+      errors.join("\n").indexOf("cleanup close failed"),
+    );
+  });
+
   it("animates close for only the configured delay and restores default after Eww failures", async () => {
     const sleep = vi.fn(async () => undefined);
     const { calls, dependencies, errors } = harness(
@@ -304,6 +345,67 @@ describe("runtime bundles", () => {
       }
       const executed = await executeBundle(copiedPath, arguments_, temporaryDirectory, environment);
       expect(executed.exitCode).toBe(exitCode);
+      expect(`${executed.stdout}\n${executed.stderr}`).not.toContain("Dynamic require of");
+      if (filename === "daemon.mjs") {
+        expect(executed.stderr).toBe("");
+        expect(JSON.parse(executed.stdout)).toMatchObject({ event: "daemon_start_failed" });
+      } else if (filename === "renderer.mjs") {
+        expect(executed.stderr).toBe("");
+        expect(JSON.parse(executed.stdout)).toMatchObject({ class: ["offline"] });
+      } else {
+        expect(executed.stderr).toContain("Usage:");
+      }
     },
   );
+});
+
+describe("Eww source assets", () => {
+  it("gives every command button enough time to complete", async () => {
+    const source = await readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8");
+    const lines = source.split("\n");
+    const commandLines = lines
+      .map((line, index) => ({ index, line }))
+      .filter(({ line }) => line.includes(":onclick"));
+
+    expect(commandLines).toHaveLength(4);
+    for (const { index } of commandLines) {
+      expect(
+        lines.slice(Math.max(0, index - 3), index).some((line) => line.includes(":timeout")),
+      ).toBe(true);
+    }
+    expect(source.match(/:timeout "15s"/g)).toHaveLength(3);
+    expect(source.match(/:timeout "2s"/g)).toHaveLength(1);
+  });
+
+  it("keeps the overlay keyboard-neutral and its transparent panel exactly 360px wide", async () => {
+    const [yuck, scss] = await Promise.all([
+      readFile(join(repositoryDirectory, "eww", "eww.yuck"), "utf8"),
+      readFile(join(repositoryDirectory, "eww", "eww.scss"), "utf8"),
+    ]);
+    const panelRule = scss.match(/\.toggl-panel\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(yuck).toContain(':focusable "none"');
+    expect(yuck).not.toContain(":focusable true");
+    expect(yuck).toContain(":width 360");
+    expect(panelRule).not.toContain("min-width");
+    expect(scss).toMatch(/window\s*\{[^}]*background-color:\s*transparent;/s);
+  });
+});
+
+describe("package metadata", () => {
+  it("locks the drawer bin and the shared esbuild toolchain version", async () => {
+    const [rootPackageSource, clientPackageSource, lockSource] = await Promise.all([
+      readFile(join(repositoryDirectory, "package.json"), "utf8"),
+      readFile(join(clientDirectory, "package.json"), "utf8"),
+      readFile(join(repositoryDirectory, "package-lock.json"), "utf8"),
+    ]);
+    const rootPackage = JSON.parse(rootPackageSource);
+    const clientPackage = JSON.parse(clientPackageSource);
+    const lock = JSON.parse(lockSource);
+
+    expect(rootPackage.devDependencies.esbuild).toBe("0.28.1");
+    expect(lock.packages[""].devDependencies.esbuild).toBe("0.28.1");
+    expect(lock.packages.client.bin).toEqual(clientPackage.bin);
+    expect(lock.packages.client.bin["toggl-waybar-drawer"]).toBe("dist/drawer-controller.js");
+  });
 });

@@ -147,6 +147,36 @@ export async function runDrawerController(
   const eww = (...ewwArguments_: string[]) =>
     run("eww", ewwArguments(configDirectory, ...ewwArguments_));
 
+  const cleanupFailedOpen = async (originalFailure: string): Promise<number> => {
+    const failures = [originalFailure];
+    try {
+      const closed = await eww("close", drawerName);
+      if (closed.exitCode !== 0) {
+        failures.push(
+          `Unable to clean up the Toggl drawer window: ${failureMessage("eww", closed)}`,
+        );
+      }
+    } catch (error) {
+      failures.push(
+        `Unable to clean up the Toggl drawer window: ${error instanceof Error ? error.message : "eww failed"}`,
+      );
+    }
+    try {
+      const restored = await run("swaymsg", ["mode", "default"]);
+      if (restored.exitCode !== 0) {
+        failures.push(
+          `Unable to restore the default Sway mode: ${failureMessage("swaymsg", restored)}`,
+        );
+      }
+    } catch (error) {
+      failures.push(
+        `Unable to restore the default Sway mode: ${error instanceof Error ? error.message : "swaymsg failed"}`,
+      );
+    }
+    writeError(`${failures.join("\n")}\n`);
+    return 1;
+  };
+
   const open = async (): Promise<number> => {
     let output = parsed.output;
     if (output === null) {
@@ -169,10 +199,17 @@ export async function runDrawerController(
       writeError(`Unable to open the Toggl drawer: ${failureMessage("eww", opened)}\n`);
       return 1;
     }
-    const revealed = await eww("update", "drawer_revealed=true");
-    if (revealed.exitCode !== 0) {
-      writeError(`Unable to reveal the Toggl drawer: ${failureMessage("eww", revealed)}\n`);
-      return 1;
+    try {
+      const revealed = await eww("update", "drawer_revealed=true");
+      if (revealed.exitCode !== 0) {
+        return cleanupFailedOpen(
+          `Unable to reveal the Toggl drawer: ${failureMessage("eww", revealed)}`,
+        );
+      }
+    } catch (error) {
+      return cleanupFailedOpen(
+        `Unable to reveal the Toggl drawer: ${error instanceof Error ? error.message : "eww failed"}`,
+      );
     }
 
     try {
