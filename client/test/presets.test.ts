@@ -132,4 +132,38 @@ describe("resume presets", () => {
 
     expect(upserted[0]).toMatchObject({ id: matching.id, projectName: "Renamed project" });
   });
+
+  it("projects rich entry input to only persisted resume fields", () => {
+    const richEntry = {
+      ...preset(),
+      userId: "303",
+      start: "2026-08-27T10:00:00Z",
+      stop: null,
+      durationSeconds: null,
+      updatedAt: "2026-08-27T10:00:01Z",
+    };
+
+    expect(
+      upsertPreset(
+        [],
+        richEntry,
+        "2026-08-27T12:00:00Z",
+        () => "0182cc10-54d1-7c35-b4f3-e93bb4c0b999",
+      ),
+    ).toStrictEqual([
+      {
+        id: "0182cc10-54d1-7c35-b4f3-e93bb4c0b999",
+        workspaceId: "202",
+        description: "Review",
+        projectId: "404",
+        taskId: "505",
+        tagIds: ["606", "607"],
+        tags: ["client", "urgent"],
+        billable: true,
+        projectName: "Internal",
+        taskName: "Write tests",
+        lastUsedAt: "2026-08-27T12:00:00Z",
+      },
+    ]);
+  });
 });

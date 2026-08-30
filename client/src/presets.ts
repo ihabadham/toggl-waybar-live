@@ -28,9 +28,13 @@ function canonicalValues(values: readonly string[]): string[] {
 
 function canonicalActivity(activity: ResumeActivity): ResumeActivity {
   return {
-    ...activity,
+    workspaceId: activity.workspaceId,
+    description: activity.description,
+    projectId: activity.projectId,
+    taskId: activity.taskId,
     tagIds: canonicalValues(activity.tagIds),
     tags: canonicalValues(activity.tags),
+    billable: activity.billable,
   };
 }
 
