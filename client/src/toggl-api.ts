@@ -7,7 +7,9 @@ import {
 
 import { togglRequestDeadlineMilliseconds } from "./control-timing.js";
 import type { DayWindow } from "./day-window.js";
+import type { MonthWindow } from "./month-window.js";
 import type { ResumeActivity } from "./presets.js";
+import { type ProjectColor, projectColor } from "./project-color.js";
 
 export interface QuotaStatus {
   remaining: number | null;
@@ -27,6 +29,7 @@ export type ApiResult<T> =
 
 export interface RichTogglEntry extends NormalizedEntry {
   billable: boolean;
+  projectColor: ProjectColor | null;
   tagIds: string[];
   tags: string[];
   taskId: string | null;
@@ -43,6 +46,11 @@ interface RequestOptions<T> {
   currentNotFound?: T;
   method: RequestMethod;
   parse: (value: unknown) => T;
+}
+
+interface TimeEntryWindow {
+  end: string;
+  start: string;
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -130,6 +138,7 @@ function normalizeEntry(value: unknown): RichTogglEntry {
     taskId:
       rawTaskId === null || rawTaskId === undefined ? null : externalIdSchema.parse(rawTaskId),
     taskName: typeof value.task_name === "string" ? value.task_name : null,
+    projectColor: projectColor(value.project_color),
     tagIds: externalIdArray(value.tag_ids, "tag_ids"),
     tags: stringArray(value.tags, "tags"),
     billable: boolean(value.billable, "billable"),
@@ -169,6 +178,14 @@ export class TogglApi {
   }
 
   async fetchToday(window: DayWindow): Promise<ApiResult<RichTogglEntry[]>> {
+    return this.fetchEntries(window);
+  }
+
+  async fetchMonth(window: MonthWindow): Promise<ApiResult<RichTogglEntry[]>> {
+    return this.fetchEntries(window);
+  }
+
+  private async fetchEntries(window: TimeEntryWindow): Promise<ApiResult<RichTogglEntry[]>> {
     const url = new URL("/api/v9/me/time_entries", this.baseUrl);
     url.searchParams.set("start_date", window.start);
     url.searchParams.set("end_date", window.end);

@@ -18,6 +18,7 @@ function preset(overrides: Partial<ResumePreset> = {}): ResumePreset {
     tagIds: ["607", "606"],
     tags: ["urgent", "client"],
     billable: true,
+    projectColor: "#c9806b",
     projectName: "Internal",
     taskName: "Write tests",
     lastUsedAt: "2026-08-27T10:00:00Z",
@@ -52,6 +53,7 @@ describe("resume presets", () => {
         ...original,
         tagIds: ["606", "607", "606"],
         tags: ["client", "urgent", "client"],
+        projectColor: "#aabbcc",
         projectName: "Renamed project",
         taskName: "Renamed task",
       },
@@ -62,6 +64,7 @@ describe("resume presets", () => {
     expect(merged).toMatchObject([
       {
         id: original.id,
+        projectColor: "#aabbcc",
         projectName: "Renamed project",
         taskName: "Renamed task",
         tagIds: ["606", "607"],
@@ -160,6 +163,7 @@ describe("resume presets", () => {
         tagIds: ["606", "607"],
         tags: ["client", "urgent"],
         billable: true,
+        projectColor: "#c9806b",
         projectName: "Internal",
         taskName: "Write tests",
         lastUsedAt: "2026-08-27T12:00:00Z",

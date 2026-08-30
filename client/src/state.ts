@@ -1,6 +1,7 @@
 import type { NormalizedEntry, RelayMessage, RunningSnapshot } from "@toggl-waybar-live/shared";
 
 import { type DayWindow, instantBelongsToDay } from "./day-window.js";
+import type { ProjectColor } from "./project-color.js";
 import type { RichTogglEntry } from "./toggl-api.js";
 
 export type ConnectionState = "connected" | "stale" | "offline";
@@ -9,17 +10,26 @@ export interface CurrentEntry {
   description: string;
   id: string;
   projectId: string | null;
+  projectColor: ProjectColor | null;
   projectName: string | null;
   start: string;
+  taskName: string | null;
   workspaceId: string;
 }
+
+export interface ClientEntry extends NormalizedEntry {
+  projectColor: ProjectColor | null;
+  taskName: string | null;
+}
+
+type PresentableEntry = NormalizedEntry & Partial<Pick<ClientEntry, "projectColor" | "taskName">>;
 
 export interface ClientState {
   connection: ConnectionState;
   current: CurrentEntry | null;
   currentContributesToToday: boolean;
   dayKey: string;
-  entries: Map<string, NormalizedEntry>;
+  entries: Map<string, ClientEntry>;
   lastSynchronizedAt: string | null;
   pending: "stopping" | "resuming" | null;
   stoppedEntryIds: ReadonlySet<string>;
@@ -86,9 +96,11 @@ function currentFromSnapshot(snapshot: RunningSnapshot, state: ClientState): Cur
     id: snapshot.entryId,
     workspaceId: snapshot.workspaceId,
     projectId: snapshot.projectId,
+    projectColor: known?.projectColor ?? previous?.projectColor ?? null,
     projectName: known?.projectName ?? previous?.projectName ?? null,
     description: snapshot.description,
     start: snapshot.start,
+    taskName: known?.taskName ?? previous?.taskName ?? null,
   };
 }
 
@@ -130,10 +142,12 @@ export function applyRelayMessage(
 
   const entry = message.change.entry;
   const known = state.entries.get(entry.id);
-  const mergedEntry: NormalizedEntry = {
+  const mergedEntry: ClientEntry = {
     ...known,
     ...entry,
+    projectColor: known?.projectColor ?? null,
     projectName: entry.projectName ?? known?.projectName ?? null,
+    taskName: known?.taskName ?? null,
   };
   if (instantBelongsToDay(entry.start, window)) {
     entries.set(entry.id, mergedEntry);
@@ -150,9 +164,11 @@ export function applyRelayMessage(
             id: entry.id,
             workspaceId: entry.workspaceId,
             projectId: entry.projectId,
+            projectColor: state.current.projectColor,
             projectName: entry.projectName ?? state.current.projectName,
             description: entry.description,
             start: entry.start,
+            taskName: state.current.taskName,
           }
         : state.current;
   return {
@@ -167,25 +183,35 @@ export function applyRelayMessage(
   };
 }
 
-function currentFromEntry(entry: NormalizedEntry): CurrentEntry {
+function clientEntry(entry: PresentableEntry): ClientEntry {
+  return {
+    ...entry,
+    projectColor: entry.projectColor ?? null,
+    taskName: entry.taskName ?? null,
+  };
+}
+
+function currentFromEntry(entry: PresentableEntry): CurrentEntry {
   return {
     id: entry.id,
     workspaceId: entry.workspaceId,
     projectId: entry.projectId,
+    projectColor: entry.projectColor ?? null,
     projectName: entry.projectName,
     description: entry.description,
     start: entry.start,
+    taskName: entry.taskName ?? null,
   };
 }
 
 function withTodayEntry(
   state: ClientState,
-  entry: NormalizedEntry,
+  entry: PresentableEntry,
   window: DayWindow,
-): Map<string, NormalizedEntry> {
+): Map<string, ClientEntry> {
   const entries = new Map(state.entries);
   if (instantBelongsToDay(entry.start, window)) {
-    entries.set(entry.id, entry);
+    entries.set(entry.id, clientEntry(entry));
   } else {
     entries.delete(entry.id);
   }
@@ -262,32 +288,22 @@ export function applyConfirmedCurrent(
 
 export function replaceReconciledEntries(
   initialState: ClientState,
-  entries: readonly NormalizedEntry[],
-  current: NormalizedEntry | null,
+  entries: readonly PresentableEntry[],
+  current: PresentableEntry | null,
   window: DayWindow,
   synchronizedAt: string,
 ): ClientState {
   const state = rotateDay(initialState, window);
-  const today = new Map<string, NormalizedEntry>();
+  const today = new Map<string, ClientEntry>();
   for (const entry of entries) {
     if (instantBelongsToDay(entry.start, window)) {
-      today.set(entry.id, entry);
+      today.set(entry.id, clientEntry(entry));
     }
   }
 
   return {
     ...state,
-    current:
-      current === null
-        ? null
-        : {
-            id: current.id,
-            workspaceId: current.workspaceId,
-            projectId: current.projectId,
-            projectName: current.projectName,
-            description: current.description,
-            start: current.start,
-          },
+    current: current === null ? null : currentFromEntry(current),
     currentContributesToToday: current !== null && instantBelongsToDay(current.start, window),
     entries: today,
     lastSynchronizedAt: synchronizedAt,
@@ -300,24 +316,14 @@ export function replaceReconciledEntries(
 
 export function replaceReconciledCurrent(
   initialState: ClientState,
-  current: NormalizedEntry | null,
+  current: PresentableEntry | null,
   window: DayWindow,
   synchronizedAt: string,
 ): ClientState {
   const state = rotateDay(initialState, window);
   return {
     ...state,
-    current:
-      current === null
-        ? null
-        : {
-            id: current.id,
-            workspaceId: current.workspaceId,
-            projectId: current.projectId,
-            projectName: current.projectName,
-            description: current.description,
-            start: current.start,
-          },
+    current: current === null ? null : currentFromEntry(current),
     currentContributesToToday: current !== null && instantBelongsToDay(current.start, window),
     lastSynchronizedAt: synchronizedAt,
   };

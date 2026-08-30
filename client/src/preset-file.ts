@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { maximumPresets, type ResumePreset } from "./presets.js";
 import { readPrivateJson, writePrivateJson } from "./private-json-file.js";
+import { projectColorSchema } from "./project-color.js";
 
 const maximumPresetFileBytes = 64 * 1_024;
 
@@ -14,6 +15,7 @@ const presetSchema = z.strictObject({
   tagIds: z.array(z.string().regex(/^\d+$/)),
   tags: z.array(z.string()),
   billable: z.boolean(),
+  projectColor: projectColorSchema.nullable().default(null),
   projectName: z.string().nullable(),
   taskName: z.string().nullable(),
   lastUsedAt: z.iso.datetime({ offset: true }),

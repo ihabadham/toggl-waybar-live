@@ -37,6 +37,7 @@ function entry(overrides: Partial<NormalizedEntry> = {}): NormalizedEntry {
 function richEntry(overrides: Partial<RichTogglEntry> = {}): RichTogglEntry {
   return {
     ...entry(),
+    projectColor: "#c9806b",
     taskId: "505",
     taskName: "Review task",
     tagIds: ["606"],
@@ -121,10 +122,22 @@ describe("client state", () => {
     state = applyRelayMessage(state, changed(entry({ projectName: null })), window);
 
     expect(state.current?.projectName).toBe("Internal");
+    expect(state.current?.projectColor).toBe("#c9806b");
+    expect(state.current?.taskName).toBe("Review task");
     expect(state.entries.get("101")).toMatchObject({
+      projectColor: "#c9806b",
       projectName: "Internal",
       taskName: "Review task",
       tags: ["focus"],
+    });
+  });
+
+  it("uses null presentation metadata for an unseen narrow relay entry", () => {
+    const state = applyRelayMessage(createState(window.dayKey), changed(entry()), window);
+
+    expect(state.entries.get("101")).toMatchObject({
+      projectColor: null,
+      taskName: null,
     });
   });
 

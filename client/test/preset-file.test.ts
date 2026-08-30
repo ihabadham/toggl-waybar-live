@@ -24,6 +24,7 @@ function preset(overrides: Partial<ResumePreset> = {}): ResumePreset {
     tagIds: ["606"],
     tags: ["client"],
     billable: true,
+    projectColor: "#c9806b",
     projectName: "Internal",
     taskName: "Write tests",
     lastUsedAt: "2026-08-27T10:00:00Z",
@@ -53,6 +54,18 @@ describe("preset file", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ version: 1, presets: [preset()] });
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect((await stat(join(path, ".."))).mode & 0o777).toBe(0o700);
+  });
+
+  it("loads version-one presets written before project colors were persisted", async () => {
+    const path = await temporaryPresetPath();
+    const { projectColor: _projectColor, ...legacyPreset } = preset();
+    await savePresets(path, [preset()]);
+    await writeFile(path, JSON.stringify({ version: 1, presets: [legacyPreset] }), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+
+    expect(await loadPresets(path)).toEqual([preset({ projectColor: null })]);
   });
 
   it("loads missing, corrupt, oversized, and invalid files as an empty preset list", async () => {

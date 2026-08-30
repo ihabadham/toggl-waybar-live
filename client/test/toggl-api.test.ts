@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { dayWindowAt } from "../src/day-window.js";
+import { monthWindowAt } from "../src/month-window.js";
 import { TogglApi } from "../src/toggl-api.js";
 
 const token = "private-test-token";
@@ -12,6 +13,7 @@ const apiEntry = {
   user_id: 303,
   project_id: 404,
   project_name: "Internal",
+  project_color: "#c9806b",
   task_id: 505,
   task_name: "Write tests",
   tag_ids: [607, 606],
@@ -59,6 +61,7 @@ describe("Toggl API", () => {
           workspaceId: "202",
           userId: "303",
           projectId: "404",
+          projectColor: "#c9806b",
           projectName: "Internal",
           description: "Review",
           start: "2026-08-27T10:00:00Z",
@@ -73,6 +76,41 @@ describe("Toggl API", () => {
         },
       ],
       quota: { remaining: 28, resetsInSeconds: 1_750 },
+    });
+  });
+
+  it("requests the current local month without dropping a ceiling-sized response", async () => {
+    const requests: string[] = [];
+    const entries = Array.from({ length: 1_000 }, (_, index) => ({
+      ...apiEntry,
+      id: index + 1,
+    }));
+    const api = new TogglApi(token, async (input) => {
+      requests.push(String(input));
+      return Response.json(entries);
+    });
+
+    const result = await api.fetchMonth(monthWindowAt("2026-08-15T12:00:00Z", "Africa/Cairo"));
+
+    expect(requests).toEqual([
+      "https://api.track.toggl.com/api/v9/me/time_entries?" +
+        "start_date=2026-07-31T21%3A00%3A00.000Z&" +
+        "end_date=2026-08-31T21%3A00%3A00.000Z&meta=true",
+    ]);
+    expect(result).toMatchObject({ ok: true, data: expect.any(Array) });
+    if (result.ok) {
+      expect(result.data).toHaveLength(1_000);
+    }
+  });
+
+  it("falls back to no project color when Toggl metadata is malformed", async () => {
+    const api = new TogglApi(token, async () =>
+      Response.json([{ ...apiEntry, project_color: "not-a-color" }]),
+    );
+
+    await expect(api.fetchToday(window)).resolves.toMatchObject({
+      ok: true,
+      data: [{ projectColor: null }],
     });
   });
 

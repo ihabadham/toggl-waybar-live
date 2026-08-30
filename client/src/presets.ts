@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import type { ProjectColor } from "./project-color.js";
+
 export const maximumPresets = 8;
 
 export interface ResumeActivity {
@@ -15,12 +17,13 @@ export interface ResumeActivity {
 export interface ResumePreset extends ResumeActivity {
   id: string;
   lastUsedAt: string;
+  projectColor: ProjectColor | null;
   projectName: string | null;
   taskName: string | null;
 }
 
 export interface PresetUpdate {
-  activity: ResumeActivity & Pick<ResumePreset, "projectName" | "taskName">;
+  activity: ResumeActivity & Pick<ResumePreset, "projectColor" | "projectName" | "taskName">;
   lastUsedAt: string;
 }
 
@@ -76,6 +79,7 @@ export function activityFromPreset(preset: ResumePreset): ResumeActivity {
   const {
     id: _id,
     lastUsedAt: _lastUsedAt,
+    projectColor: _projectColor,
     projectName: _projectName,
     taskName: _taskName,
     ...activity
@@ -102,7 +106,7 @@ export function mergePresets(...presetLists: Array<readonly ResumePreset[]>): Re
 
 export function upsertPreset(
   presets: readonly ResumePreset[],
-  activity: ResumeActivity & Pick<ResumePreset, "projectName" | "taskName">,
+  activity: ResumeActivity & Pick<ResumePreset, "projectColor" | "projectName" | "taskName">,
   lastUsedAt: string,
   createId: () => string = randomUUID,
 ): ResumePreset[] {
@@ -132,6 +136,7 @@ export function upsertPresets(
       ...canonical,
       id: existingByIdentity.get(identity)?.id ?? previous?.id ?? createId(),
       lastUsedAt: update.lastUsedAt,
+      projectColor: update.activity.projectColor,
       projectName: update.activity.projectName,
       taskName: update.activity.taskName,
     };
