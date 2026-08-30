@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,9 @@ import {
 const configDirectory = "/home/test/.local/share/toggl-waybar-live/eww";
 const clientDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryDirectory = resolve(clientDirectory, "..");
+const builtinModuleSpecifiers = new Set(
+  builtinModules.flatMap((specifier) => [specifier, `node:${specifier}`]),
+);
 
 function commandResult(overrides: Partial<DrawerCommandResult> = {}): DrawerCommandResult {
   return { exitCode: 0, stdout: "", stderr: "", ...overrides };
@@ -330,7 +334,16 @@ describe("runtime bundles", () => {
         ...source.matchAll(/\bfrom\s+["']([^"']+)["']/g),
         ...source.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g),
       ].map((match) => match[1]);
-      expect(importSpecifiers.every((specifier) => specifier?.startsWith("node:"))).toBe(true);
+      const commonJsSpecifiers = [
+        ...source.matchAll(/\b(?:require|__require)\s*\(\s*["']([^"']+)["']\s*\)/g),
+      ].map((match) => match[1]);
+      expect(
+        [...importSpecifiers, ...commonJsSpecifiers].filter(
+          (specifier) => !specifier || !builtinModuleSpecifiers.has(specifier),
+        ),
+      ).toEqual([]);
+      expect(source).not.toContain("bufferutil");
+      expect(source).not.toContain("utf-8-validate");
       expect(source).not.toContain(repositoryDirectory);
 
       const environment: NodeJS.ProcessEnv = {
