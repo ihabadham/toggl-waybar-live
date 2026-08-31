@@ -519,7 +519,8 @@ try {
       `${error instanceof Error ? error.message : "Daemon startup failed"}; exit=${daemon.exitCode}; stdout=${daemonStdout.trim()}; stderr=${daemonStderr.trim()}`,
     );
   }
-  assert(fakeApiReads === 2, `Expected 2 startup Toggl reads, received ${fakeApiReads}`);
+  // Startup reconciles the current entry, today's entries, and the current month.
+  assert(fakeApiReads === 3, `Expected 3 startup Toggl reads, received ${fakeApiReads}`);
   assert(fakeApiWrites === 0, `Startup made ${fakeApiWrites} unexpected Toggl writes`);
 
   firstRenderer = startRenderer(0);
@@ -796,7 +797,7 @@ try {
   assert(firstRenderer.exitCode === null && secondRenderer.exitCode === null, "A renderer exited early");
   assert(watcher.exitCode === null, "The socket watch exited early");
   const totals = apiCounts();
-  assert(totals.reads === 5, `Expected exactly 5 Toggl reads, received ${totals.reads}`);
+  assert(totals.reads === 6, `Expected exactly 6 Toggl reads, received ${totals.reads}`);
   assert(totals.writes === 6, `Expected exactly 6 Toggl writes, received ${totals.writes}`);
   assert(totals.creates === 3, `Expected exactly 3 Toggl creates, received ${totals.creates}`);
   assert(totals.stops === 3, `Expected exactly 3 Toggl stops, received ${totals.stops}`);
