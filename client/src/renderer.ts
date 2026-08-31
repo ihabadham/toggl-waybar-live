@@ -21,6 +21,7 @@ const offlineState: RendererState = {
   runningContributesToToday: false,
   generatedAt: new Date(0).toISOString(),
   lastSynchronizedAt: null,
+  pending: null,
 };
 
 export async function renderOnce(

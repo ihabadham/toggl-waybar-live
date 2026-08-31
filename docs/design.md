@@ -1,13 +1,13 @@
 # toggl-waybar-live design
 
-Status: approved for implementation
-
 ## Goal
 
 Show the current Toggl Track entry in Waybar with a locally advancing timer.
 Starting, editing, or stopping an entry should normally appear within seconds,
 without polling Toggl every second. When no entry is running, show today's
-tracked total.
+tracked total. Local controls can stop the trusted current entry or resume one
+of eight recent activities without sending credentials or mutations through
+Cloudflare.
 
 The first supported environment is Fedora, Sway, Waybar, and systemd user
 services. The core protocol and configuration must remain reusable without
@@ -16,7 +16,8 @@ building a generalized installer before the end-to-end path works.
 ## Non-goals for the first version
 
 - Replacing the Toggl desktop or web application.
-- Starting, stopping, or editing entries from Waybar.
+- Editing or deleting arbitrary entry details.
+- Switching activities through an automatic stop-then-start transaction.
 - Supporting multiple Toggl users through one relay deployment.
 - Storing time-entry history in Cloudflare.
 - Providing packages, automatic releases, or every init-system integration.
@@ -61,8 +62,10 @@ Durable Object -- latest snapshot and hibernating WebSocket fan-out
         |
         v
 Local daemon -- one connection, reconciliation, local derived state
-        |
-        +--> runtime state file <-- Waybar renderer on each output
+   ^    |    ^
+   |    |    +-- private control socket <-- local CLI <-- Waybar / Sway / Eww
+   |    +------> runtime state file <-- Waybar renderer on each output
+   +----------- Toggl REST reads and user-requested writes
 ```
 
 ### Cloudflare Worker
@@ -104,17 +107,21 @@ One systemd user service owns all network access. It:
 
 - maintains one authenticated WebSocket, regardless of Waybar output count;
 - fetches today's entries at startup and after a meaningful offline period;
-- maintains today's entry map and project-name cache locally;
+- maintains Today and current-month entry maps plus project metadata locally;
+- serializes stop/resume commands received through a private Unix socket;
+- persists up to eight exact resume activities under the XDG state directory;
 - merges relay changes into the local derived state;
 - writes the renderer state atomically; and
 - reconnects with exponential backoff and jitter, capped at 60 seconds.
 
-The daemon uses the user's configured IANA timezone to determine the local-day
-boundary, then sends explicit RFC 3339 bounds to Toggl. Timestamps remain UTC
-internally. This avoids incorrect totals around midnight and daylight-saving
-changes.
+The daemon uses the user's configured IANA timezone to determine local-day and
+local-month boundaries, then sends explicit RFC 3339 bounds to Toggl.
+Timestamps remain UTC internally. Entries belong to the calendar period in
+which they started; entries crossing midnight or a month boundary are not
+split. This matches Toggl's list-filter behavior and remains correct around
+daylight-saving changes.
 
-### Waybar renderer
+### Local presentation and controls
 
 Each Waybar output runs one small, long-lived renderer. A renderer reads shared
 local state and emits Waybar JSON once per second. It performs no network
@@ -130,6 +137,26 @@ $XDG_RUNTIME_DIR/toggl-waybar-live/state.json
 The daemon updates it with write-then-rename semantics. Project metadata may be
 cached under `$XDG_CACHE_HOME/toggl-waybar-live/`; cache loss affects labels,
 not correctness of the running timer.
+
+The credential-free `toggl-waybar` CLI sends only fixed command names and
+validated preset UUIDs over `$XDG_RUNTIME_DIR/toggl-waybar-live/control.sock`.
+It supports toggle, stop, resume, and a reconnecting watch stream. Toggle
+confirms stale state before deciding whether to stop or resume. The optional
+Eww drawer consumes the watch projection and invokes the same CLI; it performs
+no network requests and receives no token.
+
+The drawer projection contains the current activity, Quick Resume rows, a
+bounded newest-first Today timeline, and a compact current-month aggregate.
+One local one-second tick advances the current duration, Today total, running
+Today row, and eligible month total together. The tick reuses the latest watch
+snapshot; it does not create another socket subscription, configuration read,
+or Toggl request.
+
+Today history is capped at 50 rows and trimmed further when needed to keep the
+projected snapshot at or below 48 KiB inside the protocol's 64 KiB frame limit.
+The projection reports the total row count and how many earlier rows were
+omitted, so truncation is visible rather than silent. The drawer receives only
+the month aggregate, not full month history.
 
 ## Toggl integration
 
@@ -151,25 +178,37 @@ acknowledged and ignored.
 The daemon reconciles through `GET /api/v9/me/time_entries` with the current
 local day's start and end, plus `GET /api/v9/me/time_entries/current`. The
 second request is required because Toggl filters the list by entry start time;
-an entry that began before local midnight can still be running today. Results
-are merged by entry ID.
+an entry that began before local midnight can still be running. Results are
+merged by entry ID. A separate bounded list request refreshes the current-month
+aggregate when due.
+
+Local stop uses Toggl's workspace-scoped stop endpoint. Resume creates a new
+entry containing the preset's workspace, description, project, task, tags, and
+billable status. There is no automatic stop-then-start operation and no blind
+retry when a create response is ambiguous. A later webhook is treated as an
+idempotent echo of the already-applied local result.
 
 ### Quota budget
 
-Healthy operation is push-driven. A full, two-request reconciliation is limited
-to at most once per ten-minute window and normally occurs only at startup or
-after a meaningful disconnection. While the relay is unavailable, a
-current-entry-only check may run in the alternating five-minute window. All
-Toggl REST calls share one local quota gate; project-name lookup is deferred
-when that budget is low.
+Healthy operation is push-driven. A full Today/current reconciliation is
+limited to at most once per ten-minute window. While the relay is unavailable,
+a current-entry-only check may run in the alternating five-minute window. The
+optional month read runs only inside a full reconciliation, at most once per
+hour, after the core Today/current state succeeds and quota remains available.
 
-This caps this application's user-specific steady-state fallback at 18 requests
-per hour: twelve current-entry checks and six daily-list requests.
-That remains below Toggl's documented 30-request sliding-window quota. The
-client also reads `X-Toggl-Quota-Remaining` and `X-Toggl-Quota-Resets-In`, stops
-early when the budget is low, and honors Toggl's quota response instead of
-retrying. Project lookup is cached and requested only for an unknown project
-ID.
+The scheduled-maintenance ceiling is 19 requests per hour: twelve requests
+from six full Today/current reconciliations, six disconnected current checks,
+and one month read. This leaves eleven requests below Toggl's documented
+30-request sliding-window quota before user-triggered or conflict-confirmation
+traffic. Independently, the quota gate stops background work when Toggl reports
+six or fewer requests remaining and honors the reported reset interval.
+
+Every Toggl REST operation passes through one scheduler. It allows one active
+request, spaces request starts by at least one second, and gives admitted Stop,
+Resume, and confirmation work priority over queued background reads. A queued
+background request is skipped without consuming quota when newer state makes
+it irrelevant. Interactive requests remain additional to the 19-request
+maintenance ceiling, and their quota headers feed the same gate.
 
 ## Protocol and state
 
@@ -209,9 +248,17 @@ because it changes when Toggl retries a delivery. Reprocessing the same event
 is a no-op.
 
 The local state is richer than the hosted snapshot. It contains the current
-entry, today's entry map and total, cached display names, connection status,
-and synchronization timestamps. Only the renderer projection is written to the
-runtime file.
+entry, Today and current-month entry maps and totals, cached display metadata,
+connection status, and synchronization timestamps. Only bounded presentation
+projections leave the daemon.
+
+The local control protocol is separately versioned and runtime-validated. Each
+socket connection sends one request; watch connections receive bounded state
+snapshots until disconnected. Frames are capped at 64 KiB and the socket has
+mode `0600`. Resume presets are strict, atomic mode-`0600` JSON under
+`$XDG_STATE_HOME/toggl-waybar-live/`. Identity includes workspace,
+description, project, task, tags, and billable state; reusing one preserves its
+UUID and moves it to the MRU front.
 
 ## Security and data retention
 
@@ -227,6 +274,13 @@ No secret is accepted in a tracked configuration file, command argument, URL,
 or Waybar configuration. Examples contain unmistakable placeholders. Setup
 refuses empty values and known placeholders, writes local secret files with
 mode `0600`, and uses `wrangler secret put` for Cloudflare.
+
+The daemon is the only local process that reads the Toggl token. The CLI,
+Waybar, Sway commands, Eww configuration, control socket messages, renderer
+state, and preset file contain no credentials. User-controlled descriptions
+and labels remain data; only fixed commands and validated UUIDs cross command
+boundaries. Installer-owned files are atomically replaced, symlink targets are
+rejected, and wrappers refer to installed XDG bundles instead of a checkout.
 
 Webhook validation uses the raw body and a constant-time comparison. The
 Worker validates the signed `url_callback` against its configured callback and
@@ -245,11 +299,18 @@ descriptions, and secret material.
 | WebSocket interruption | Mark state stale, continue a known timer, reconnect with bounded backoff |
 | Worker unavailable | Use throttled Toggl REST fallback and retain visible stale status |
 | Toggl REST unavailable or quota-limited | Keep last derived state, expose failure in tooltip, wait for allowed retry |
+| First month refresh fails | Show the month as unavailable without blocking Today or controls |
+| Later month refresh fails | Preserve the last month total and mark it stale |
+| Month response reaches 1,000 entries | Mark the total partial and display it as a lower bound |
 | Invalid webhook | Reject without changing state |
 | Duplicate or out-of-order webhook | Acknowledge safely without rolling state backward |
 | Corrupt runtime state | Renderer shows unavailable; daemon replaces it on the next valid projection |
 | Daemon crash | systemd restarts it; startup reconciliation restores local state |
 | Suspend/resume | WebSocket reconnect plus throttled reconciliation restores missed changes |
+| Daemon unavailable during a command | CLI exits nonzero; watch shows an actionable unavailable view and reconnects |
+| Stale state before toggle | Confirm the current entry once before choosing stop or resume |
+| Ambiguous create response | Check current once, block another resume if still uncertain, and never retry blindly |
+| Preset persistence failure | Preserve trusted timer state, report the failure, and do not write invalid preset data |
 
 The local service must never enter a tight retry loop. Network and parsing
 failures are observable in structured logs, while user-facing text remains
@@ -261,7 +322,8 @@ short.
 worker/       Cloudflare Worker and Durable Object
 client/       local daemon and Waybar renderer
 shared/       protocol schemas and shared types
-examples/     Waybar and systemd configurations
+eww/          optional dedicated drawer configuration
+examples/     Waybar, Sway, and systemd configurations
 docs/         design and operating documentation
 ```
 
@@ -281,9 +343,13 @@ caller or independent test seam requires one.
 - Raw-body HMAC verification and rejection paths.
 - Payload normalization and target-user filtering.
 - Duplicate, retry, deletion, and out-of-order event handling.
-- Local-day boundaries, duration math, and today-total updates.
+- Local-day and local-month boundaries, duration math, and aggregate updates.
+- Bounded Today history, month availability, partial results, and local ticking.
 - Visible-label fallback, truncation, timer formatting, and stale classes.
-- Reconciliation throttling and quota-header behavior.
+- Prioritized request scheduling, reconciliation throttling, and quota headers.
+- Preset identity, strict persistence, command ordering, and ambiguous writes.
+- Local socket framing, permissions, CLI grammar, and reconnecting watch state.
+- Drawer output selection and fixed command/config paths.
 
 ### Integration tests
 
@@ -297,8 +363,10 @@ caller or independent test seam requires one.
 ### End-to-end development path
 
 One development command starts the local Worker environment, fake Toggl API,
-daemon, and renderer. Signed fixtures exercise start, update, stop, deletion,
-invalid signature, and reconnect behavior while producing real Waybar JSON.
+daemon, two renderers, and a real socket watch. Signed fixtures and CLI commands
+exercise stop, resume-last, selected resume, webhook echoes, stale confirmation,
+an ambiguous create without retry, invalid signatures, and reconnect behavior
+while producing real Waybar JSON.
 
 Real-account acceptance then records evidence for:
 
@@ -326,9 +394,11 @@ Durable Objects, while GitHub Actions already verifies the complete local path.
 Runtime secrets are managed separately in Cloudflare and remain attached across
 code deployments.
 
-Packaging, automatic releases, multi-distribution installation, and a
-generalized setup wizard remain deferred. Worker code deployment is automated
-because the production path and rollback behavior are now established.
+OS packaging, automatic releases, multi-distribution installation, and a
+generalized setup wizard remain deferred. The local installer copies bundled
+artifacts to stable XDG paths without enabling services or editing desktop
+configuration. Worker code deployment is automated because the production path
+and rollback behavior are established.
 
 ## References
 

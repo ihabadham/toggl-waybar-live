@@ -109,6 +109,12 @@ function detail(label: string, value: string): string {
 function tooltip(state: RendererState, now: string): string {
   const divider = colored("────────────────────────────", "#5B503B");
   const today = formatDuration(todayAt(state, now));
+  const pending =
+    state.pending === "stopping"
+      ? colored("Stopping…", "#D6A84F")
+      : state.pending === "resuming"
+        ? colored("Resuming…", "#D6A84F")
+        : null;
   if (state.status === "running" && state.entryStart) {
     const title = escapeMarkup(state.description || state.projectName || "Running");
     const active = formatDuration(elapsedSince(state.entryStart, now));
@@ -120,6 +126,7 @@ function tooltip(state: RendererState, now: string): string {
       `<tt>${detail("Project", project)}\n${detail("Started", formatStartTime(state.entryStart, now))}\n${detail("Today", today)}</tt>`,
       divider,
       relayStatus(state, now),
+      ...(pending === null ? [] : [pending]),
     ].join("\n");
   }
 
@@ -130,6 +137,7 @@ function tooltip(state: RendererState, now: string): string {
     `<tt>${detail("Today", today)}</tt>`,
     divider,
     relayStatus(state, now),
+    ...(pending === null ? [] : [pending]),
   ].join("\n");
 }
 
@@ -147,11 +155,12 @@ export function renderWaybar(
   now: string,
   options: RenderOptions,
 ): WaybarOutput {
+  const pendingClass = state.pending === null || state.pending === undefined ? [] : [state.pending];
   if (state.status === "offline") {
     return {
       text: colored("● Toggl offline", "#937A5C"),
       tooltip: `<b>Toggl Track</b>\n${relayStatus(state, now)}`,
-      class: ["offline"],
+      class: ["offline", ...pendingClass],
     };
   }
 
@@ -163,7 +172,7 @@ export function renderWaybar(
           ? `${colored("⚠ Today", "#D6A84F")} ${timerSegment(today, "#D6A84F", "#2B2718")}`
           : `${colored("○", "#D5A59B")} ${colored("Today", "#C98CAF")} ${timerSegment(today, "#D5A59B", "#28211F")}`,
       tooltip: tooltip(state, now),
-      class: ["idle", state.connection],
+      class: ["idle", state.connection, ...pendingClass],
     };
   }
 
@@ -171,7 +180,7 @@ export function renderWaybar(
     return {
       text: colored("● Toggl offline", "#937A5C"),
       tooltip: `<b>Toggl Track</b>\n${relayStatus({ ...state, connection: "offline" }, now)}`,
-      class: ["offline"],
+      class: ["offline", ...pendingClass],
     };
   }
 
@@ -184,6 +193,6 @@ export function renderWaybar(
         ? `${colored(`⚠ ${escapeMarkup(label)}`, "#D6A84F")} ${timerSegment(active, "#D6A84F", "#2B2718")}${colored(`· Σ${compactToday}`, "#D6A84F")}`
         : `${runningText(label, active, now)}${colored(`· Σ${compactToday}`, "#A99D88")}`,
     tooltip: tooltip(state, now),
-    class: ["running", state.connection],
+    class: ["running", state.connection, ...pendingClass],
   };
 }

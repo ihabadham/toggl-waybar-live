@@ -4,21 +4,15 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "./config.js";
-import { dayWindowAt } from "./day-window.js";
+import { startControlServer } from "./control-server.js";
+import { ClientCoordinator } from "./coordinator.js";
+import { defaultPresetPath, loadPresets, savePresets } from "./preset-file.js";
 import { QuotaGate } from "./quota-gate.js";
 import { RelayClient } from "./relay-client.js";
-import { defaultRuntimeStatePath, publishRuntimeState } from "./runtime-file.js";
-import {
-  advanceDay,
-  applyRelayMessage,
-  type ClientState,
-  createState,
-  replaceReconciledCurrent,
-  replaceReconciledEntries,
-  setConnection,
-  toRendererState,
-} from "./state.js";
+import { publishRuntimeState } from "./runtime-file.js";
+import { runtimePaths } from "./runtime-path.js";
 import { TogglApi } from "./toggl-api.js";
+import { TogglRequestScheduler } from "./toggl-request-scheduler.js";
 
 const maintenanceIntervalMilliseconds = 30_000;
 
@@ -37,85 +31,78 @@ export interface DaemonController {
 
 export async function startDaemon(): Promise<DaemonController> {
   const config = loadConfig();
-  const runtimePath = defaultRuntimeStatePath();
+  const paths = runtimePaths();
+  const presetPath = defaultPresetPath();
   const api = new TogglApi(config.togglApiToken, fetch, config.apiBaseUrl);
   const quota = new QuotaGate();
-  let state: ClientState = createState(dayWindowAt(new Date(), config.timezone).dayKey);
+  const requestScheduler = new TogglRequestScheduler();
   let publishQueue = Promise.resolve();
   let maintenance: Promise<void> = Promise.resolve();
   let stopped = false;
 
-  const publish = (): void => {
-    const projection = toRendererState(state, timestamp());
+  const publish = (
+    _snapshot: unknown,
+    projection: Parameters<typeof publishRuntimeState>[1],
+  ): void => {
     publishQueue = publishQueue
-      .then(() => publishRuntimeState(runtimePath, projection))
+      .then(() => publishRuntimeState(paths.stateFile, projection))
       .catch(() => log("runtime_state_publish_failed", "error"));
   };
 
+  const coordinator = new ClientCoordinator({
+    api,
+    initialPresets: await loadPresets(presetPath),
+    log: (event) => log(event, "warning"),
+    persistPresets: (presets) => savePresets(presetPath, presets),
+    publish,
+    quotaGate: quota,
+    requestScheduler,
+    timezone: config.timezone,
+  });
+
   const reconcile = async (): Promise<void> => {
     const now = Date.now();
-    const action = quota.nextAction(now, state.connection === "connected");
+    const action = quota.nextAction(now, coordinator.snapshot().connection === "connected");
     if (action === "none") {
       return;
     }
     quota.recordAttempt(action, now);
-    const window = dayWindowAt(new Date(now), config.timezone);
-
-    if (action === "current") {
-      const current = await api.fetchCurrent();
-      quota.record(current, Date.now());
-      if (current.ok) {
-        state = replaceReconciledCurrent(state, current.data, window, timestamp());
-        if (state.connection === "offline") {
-          state = setConnection(state, "stale");
-        }
-        publish();
-      } else if (current.permanent) {
-        log("toggl_authentication_failed", "error");
-      }
-      return;
-    }
-
-    const [today, current] = await Promise.all([api.fetchToday(window), api.fetchCurrent()]);
-    quota.record(today, Date.now());
-    quota.record(current, Date.now());
-    if (today.ok && current.ok) {
-      state = replaceReconciledEntries(state, today.data, current.data, window, timestamp());
-      if (state.connection === "offline") {
-        state = setConnection(state, "stale");
-      }
-      publish();
-    } else if ((!today.ok && today.permanent) || (!current.ok && current.permanent)) {
-      log("toggl_authentication_failed", "error");
-    } else {
+    if ((await coordinator.reconcile(action)) === "failed") {
       log("reconciliation_failed", "warning");
     }
   };
 
-  publish();
-  await reconcile();
+  const controlServer = await startControlServer({
+    path: paths.controlSocket,
+    provider: coordinator,
+  });
+  publish(coordinator.snapshot(), coordinator.rendererState());
+  try {
+    await reconcile();
+  } catch (error) {
+    await controlServer.close();
+    await coordinator.drain();
+    await publishQueue;
+    throw error;
+  }
 
   const relay = new RelayClient({
     url: config.relayUrl,
     token: config.relayToken,
     onOpen: () => {
-      state = setConnection(state, "connected");
-      publish();
+      coordinator.setConnection("connected");
       log("relay_connected", "info");
     },
     onMessage: (message) => {
-      state = applyRelayMessage(state, message, dayWindowAt(new Date(), config.timezone));
-      publish();
+      coordinator.applyRelay(message);
     },
     onStale: () => {
-      state = setConnection(state, "stale");
-      publish();
+      coordinator.setConnection("stale");
       log("relay_stale", "warning");
     },
     onClose: () => {
       if (!stopped) {
-        state = setConnection(state, "stale");
-        publish();
+        coordinator.setConnection("stale");
         log("relay_disconnected", "warning");
       }
     },
@@ -125,12 +112,7 @@ export async function startDaemon(): Promise<DaemonController> {
   const maintenanceTimer = setInterval(() => {
     maintenance = maintenance
       .then(async () => {
-        const window = dayWindowAt(new Date(), config.timezone);
-        const previousDay = state.dayKey;
-        state = advanceDay(state, window);
-        if (state.dayKey !== previousDay) {
-          publish();
-        }
+        coordinator.advanceCalendar();
         await reconcile();
       })
       .catch(() => log("maintenance_failed", "error"));
@@ -149,7 +131,9 @@ export async function startDaemon(): Promise<DaemonController> {
     relay.stop();
     process.off("SIGTERM", handleSignal);
     process.off("SIGINT", handleSignal);
+    await controlServer.close();
     await maintenance;
+    await coordinator.drain();
     await publishQueue;
     finish?.();
   };

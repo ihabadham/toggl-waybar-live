@@ -19,11 +19,12 @@
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build -w shared && npm run build -w client && npm run build -w worker",
     "deploy": "npm run build -w shared && npm run deploy -w worker",
-    "check": "npm run build -w shared && npm run lint && npm run typecheck && npm test"
+    "check": "npm run build -w shared && npm run lint && npm run typecheck && npm test && npm run build -w client && npm run build -w worker && scripts/test-install"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.10",
     "@types/node": "24.13.3",
+    "esbuild": "0.28.1",
     "typescript": "7.0.2",
     "vitest": "4.1.11"
   }

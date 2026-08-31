@@ -46,7 +46,9 @@ describe("quota gate", () => {
     const gate = new QuotaGate();
     gate.record(success(6, 120), 0);
 
+    expect(gate.allowsRequest(119_999)).toBe(false);
     expect(gate.nextAction(119_999, false)).toBe("none");
+    expect(gate.allowsRequest(120_000)).toBe(true);
     expect(gate.nextAction(120_000, false)).toBe("full");
   });
 
@@ -56,6 +58,7 @@ describe("quota gate", () => {
       {
         ok: false,
         error: "quota_exhausted",
+        mayHaveSucceeded: false,
         permanent: false,
         quota: { remaining: null, resetsInSeconds: 60 },
         status: 402,
@@ -67,18 +70,26 @@ describe("quota gate", () => {
     expect(gate.nextAction(60_000, false)).toBe("full");
   });
 
-  it("caps a fully disconnected hour at 18 requests", () => {
+  it("caps a fully disconnected hour at 19 scheduled maintenance requests", () => {
     const gate = new QuotaGate();
-    let requests = 0;
+    let currentRequests = 0;
+    let fullRequests = 0;
     for (let now = 0; now < 60 * minute; now += minute) {
       const action = gate.nextAction(now, false);
       if (action === "none") {
         continue;
       }
       gate.recordAttempt(action, now);
-      requests += action === "full" ? 2 : 1;
+      if (action === "full") {
+        fullRequests += 2;
+      } else {
+        currentRequests += 1;
+      }
     }
 
-    expect(requests).toBe(18);
+    const hourlyMonthRequests = 1;
+    expect(fullRequests).toBe(12);
+    expect(currentRequests).toBe(6);
+    expect(fullRequests + currentRequests + hourlyMonthRequests).toBe(19);
   });
 });

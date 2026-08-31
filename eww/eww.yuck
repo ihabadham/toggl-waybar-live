@@ -1,0 +1,409 @@
+; The default Waybar command opens the drawer on the focused Sway output.
+; To target an output, pass --output <sway-output-name> to toggl-waybar-drawer.
+
+(defvar drawer_revealed false)
+(defvar today_expanded false)
+
+(deflisten toggl_view
+  :initial "{\"version\":1,\"status\":\"offline\",\"connection\":\"offline\",\"confidence\":\"uncertain\",\"current\":null,\"today\":\"00:00:00\",\"todayEntryCount\":0,\"todayEntryCountLabel\":\"0 entries\",\"todayEntries\":[],\"todayEntriesOmitted\":0,\"todayEntriesOmittedLabel\":\"\",\"month\":{\"availability\":\"unavailable\",\"value\":\"—\",\"cue\":\"\"},\"pending\":null,\"error\":\"Toggl daemon unavailable\",\"presets\":[]}"
+  `"__TOGGL_WAYBAR_EXECUTABLE__" watch`)
+
+; Eww #1451 can lose :visible updates while the drawer is closed. Non-animated
+; revealers preserve conditional state before the window is first mapped.
+(defwidget project-context [context marker-color marker-visible]
+  (revealer
+    :reveal {context != ""}
+    :transition "none"
+    (box
+      :class "project-context"
+      :space-evenly false
+      (box
+        :class "project-marker"
+        :style "background-color: ${marker-color}; opacity: ${marker-visible ? 1 : 0};"
+        :valign "center")
+      (label
+        :halign "fill"
+        :hexpand true
+        :justify "left"
+        :show-truncated false
+        :wrap true
+        :xalign 0
+        :text {context}))))
+
+(defwidget connection-status []
+  (label
+    :class "connection ${toggl_view.connection}"
+    :halign "end"
+    :show-truncated false
+    :text "●  ${toggl_view.connection}"))
+
+(defwidget current-summary []
+  (box
+    :class "current-summary"
+    :orientation "vertical"
+    :space-evenly false
+    (revealer
+      :reveal {jq(toggl_view, ".current != null")}
+      :transition "none"
+      (box
+        :class "current-card running"
+        :orientation "vertical"
+        :space-evenly false
+        (box :class "current-top" :space-evenly false
+          (label
+            :class "live-state"
+            :halign "start"
+            :hexpand true
+            :show-truncated false
+            :text "RUNNING NOW")
+          (label
+            :class "current-elapsed"
+            :halign "end"
+            :show-truncated false
+            :text {toggl_view.current?.elapsed ?: "00:00:00"}))
+        (label
+          :class "current-label"
+          :halign "fill"
+          :hexpand true
+          :justify "left"
+          :show-truncated false
+          :wrap true
+          :xalign 0
+          :text {toggl_view.current?.label ?: "Untitled activity"})
+        (project-context
+          :context {toggl_view.current?.context ?: ""}
+          :marker-color {toggl_view.current?.markerColor ?: "#bfa894"}
+          :marker-visible {toggl_view.current?.markerVisible ?: false})))
+    (revealer
+      :reveal {jq(toggl_view, ".current == null and .status == \"idle\"")}
+      :transition "none"
+      (box
+        :class "current-card idle"
+        :orientation "vertical"
+        :space-evenly false
+        (box :class "current-top" :space-evenly false
+          (label
+            :class "live-state idle"
+            :halign "start"
+            :hexpand true
+            :show-truncated false
+            :text "TIMER IDLE")
+          (label
+            :class "current-elapsed idle"
+            :halign "end"
+            :show-truncated false
+            :text "00:00:00"))
+        (label
+          :class "current-label"
+          :halign "start"
+          :show-truncated false
+          :text "No timer is running")
+        (label
+          :class "idle-guidance"
+          :halign "start"
+          :show-truncated false
+          :text "Choose an activity below")))
+    (revealer
+      :reveal {jq(toggl_view, ".current == null and .status != \"idle\"")}
+      :transition "none"
+      (box
+        :class "current-card unavailable"
+        :orientation "vertical"
+        :space-evenly false
+        (box :class "current-top" :space-evenly false
+          (label
+            :class "live-state unavailable"
+            :halign "start"
+            :hexpand true
+            :show-truncated false
+            :text "STATE UNAVAILABLE")
+          (label
+            :class "current-elapsed unavailable"
+            :halign "end"
+            :show-truncated false
+            :text "—"))
+        (label
+          :class "current-label"
+          :halign "start"
+          :show-truncated false
+          :text "Timer state is unavailable")
+        (label
+          :class "idle-guidance"
+          :halign "start"
+          :show-truncated false
+          :text "Waiting for the local Toggl daemon")))))
+
+(defwidget primary-controls []
+  (box
+    :class "primary-controls"
+    :orientation "vertical"
+    :space-evenly false
+    (revealer
+      :reveal {toggl_view.status == "running"}
+      :transition "none"
+      (button
+        :class "primary-button stop"
+        :active {toggl_view.status == "running" && toggl_view.confidence == "confirmed" && jq(toggl_view, ".pending == null")}
+        :timeout "15s"
+        :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" stop"
+        (label :show-truncated false :text "Stop timer")))
+    (revealer
+      :reveal {toggl_view.status != "running"}
+      :transition "none"
+      (button
+        :class "primary-button resume"
+        :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && jq(toggl_view, ".pending == null") && arraylength(toggl_view.presets) > 0}
+        :timeout "15s"
+        :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" resume && \"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
+        (label :show-truncated false :text "Resume last")))
+    (revealer
+      :reveal {jq(toggl_view, ".pending != null")}
+      :transition "none"
+      (label
+        :class "pending-message"
+        :halign "start"
+        :show-truncated false
+        :text {toggl_view.pending ?: ""}))
+    (revealer
+      :reveal {jq(toggl_view, ".error != null")}
+      :transition "none"
+      (label
+        :class "error-message"
+        :halign "start"
+        :show-truncated false
+        :wrap true
+        :text {toggl_view.error ?: ""}))))
+
+(defwidget preset-row [preset]
+  (button
+    :class "preset-row"
+    :hexpand true
+    :timeout "15s"
+    :onclick "\"__TOGGL_WAYBAR_EXECUTABLE__\" resume ${preset.id} && \"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
+    (box :class "preset-content" :hexpand true :space-evenly false
+      (box
+        :hexpand true
+        :orientation "vertical"
+        :space-evenly false
+        (label
+          :class "preset-label"
+          :halign "fill"
+          :hexpand true
+          :justify "left"
+          :show-truncated false
+          :wrap true
+          :xalign 0
+          :text {preset.label})
+        (project-context
+          :context {preset.context}
+          :marker-color {preset.markerColor}
+          :marker-visible {preset.markerVisible}))
+      (box :class "play-affordance"
+        (label :show-truncated false :text "▶")))))
+
+(defwidget quick-resume []
+  (box
+    :class "quick-resume"
+    :orientation "vertical"
+    :space-evenly false
+    (box :class "section-heading" :space-evenly false
+      (label :halign "start" :hexpand true :show-truncated false :text "QUICK RESUME")
+      (label
+        :class "resume-hint"
+        :halign "end"
+        :show-truncated false
+        :text {toggl_view.status == "running" ? "Available when idle" : "Choose any activity"}))
+    (revealer
+      :reveal {arraylength(toggl_view.presets) == 0}
+      :transition "none"
+      (label
+        :class "empty-presets"
+        :halign "start"
+        :show-truncated false
+        :text "Resumable activities appear after Toggl synchronizes."))
+    (box
+      :class "preset-list"
+      :orientation "vertical"
+      :space-evenly false
+      :active {toggl_view.status == "idle" && toggl_view.confidence == "confirmed" && jq(toggl_view, ".pending == null")}
+      (for preset in {toggl_view.presets}
+        (preset-row :preset preset)))))
+
+(defwidget today-entry-row [entry]
+  (box
+    :class {entry.running ? "today-entry-row running" : "today-entry-row"}
+    :space-evenly false
+    (box :class "timeline-rail" :valign "fill" :space-evenly false
+      (box
+        :class "timeline-marker"
+        :valign "start"))
+    (box
+      :class "entry-copy"
+      :hexpand true
+      :orientation "vertical"
+      :space-evenly false
+      (label
+        :class "entry-label"
+        :halign "fill"
+        :hexpand true
+        :justify "left"
+        :show-truncated false
+        :wrap true
+        :xalign 0
+        :text {entry.label})
+      (project-context
+        :context {entry.context}
+        :marker-color {entry.markerColor}
+        :marker-visible {entry.markerVisible}))
+    (box
+      :class "entry-time"
+      :orientation "vertical"
+      :space-evenly false
+      (label
+        :class "entry-range"
+        :halign "end"
+        :show-truncated false
+        :text {entry.range})
+      (label
+        :class "entry-duration"
+        :halign "end"
+        :show-truncated false
+        :text {entry.duration}))))
+
+(defwidget glance-and-history []
+  (box
+    :class "glance-and-history"
+    :orientation "vertical"
+    :space-evenly false
+    (box :class "glance" :space-evenly false
+      (button
+        :class "today-toggle"
+        :hexpand true
+        :timeout "2s"
+        :onclick "${EWW_CMD} update today_expanded=${today_expanded ? false : true}"
+        (box :class "today-toggle-content" :hexpand true :space-evenly false
+          (box :hexpand true :orientation "vertical" :space-evenly false
+            (label
+              :class "glance-label"
+              :halign "start"
+              :show-truncated false
+              :text "TODAY")
+            (box :class "today-value-row" :space-evenly false
+              (label
+                :class "glance-value today"
+                :halign "start"
+                :show-truncated false
+                :text {toggl_view.today})
+              (label
+                :class "entry-count"
+                :halign "start"
+                :show-truncated false
+                :text {toggl_view.todayEntryCountLabel})))
+          (label
+            :class "chevron"
+            :halign "end"
+            :show-truncated false
+            :text {today_expanded ? "⌃" : "⌄"})))
+      (box
+        :class "month-card ${toggl_view.month.availability}"
+        :orientation "vertical"
+        :space-evenly false
+        :width 210
+        (label
+          :class "glance-label"
+          :halign "start"
+          :show-truncated false
+          :text "THIS MONTH")
+        (label
+          :class "glance-value month"
+          :halign "start"
+          :show-truncated false
+          :text {toggl_view.month.value})
+        (revealer
+          :reveal {toggl_view.month.cue != ""}
+          :transition "none"
+          (label
+            :class "month-cue"
+            :halign "start"
+            :show-truncated false
+            :text {toggl_view.month.cue}))))
+    (revealer
+      :reveal today_expanded
+      :transition "slidedown"
+      :duration "150ms"
+      (box
+        :class "today-timeline"
+        :orientation "vertical"
+        :space-evenly false
+        (revealer
+          :reveal {toggl_view.todayEntryCount == 0}
+          :transition "none"
+          (label
+            :class "empty-today"
+            :halign "start"
+            :show-truncated false
+            :text "No time entries yet today."))
+        (for entry in {toggl_view.todayEntries}
+          (today-entry-row :entry entry))
+        (revealer
+          :reveal {toggl_view.todayEntriesOmitted > 0}
+          :transition "none"
+          (label
+            :class "omitted-entries"
+            :halign "start"
+            :show-truncated false
+            :text {toggl_view.todayEntriesOmittedLabel}))))))
+
+(defwidget toggl-panel []
+  (box
+    :class "toggl-panel"
+    :orientation "vertical"
+    :space-evenly false
+    :width 720
+    :vexpand true
+    (box :class "panel-heading" :space-evenly false
+      (box :orientation "vertical" :space-evenly false :hexpand true
+        (label :class "eyebrow" :halign "start" :show-truncated false :text "TOGGL TRACK")
+        (label :class "panel-title" :halign "start" :show-truncated false :text "Time drawer"))
+      (connection-status))
+    (current-summary)
+    (primary-controls)
+    (scroll
+      :class "lower-scroll"
+      :hexpand true
+      :vexpand true
+      :hscroll false
+      :vscroll true
+      (box
+        :class "lower-content"
+        :orientation "vertical"
+        :space-evenly false
+        (quick-resume)
+        (glance-and-history)))))
+
+(defwindow toggl-drawer
+  :geometry (geometry
+    :x "0%"
+    :y "0%"
+    :width "100%"
+    :height "100%"
+    :anchor "top right")
+  :stacking "overlay"
+  :exclusive false
+  :focusable false
+  (box
+    :class "toggl-overlay"
+    :orientation "horizontal"
+    :space-evenly false
+    (button
+      :class "drawer-backdrop"
+      :hexpand true
+      :vexpand true
+      :timeout "2s"
+      :onclick "\"__TOGGL_WAYBAR_DRAWER_EXECUTABLE__\" close"
+      (label :show-truncated false :text ""))
+    (revealer
+      :reveal drawer_revealed
+      :transition "slideleft"
+      :duration "180ms"
+      (toggl-panel))))

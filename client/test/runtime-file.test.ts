@@ -27,6 +27,7 @@ function rendererState(overrides: Partial<RendererState> = {}): RendererState {
     runningContributesToToday: true,
     generatedAt: "2026-08-27T11:00:00Z",
     lastSynchronizedAt: "2026-08-27T11:00:00Z",
+    pending: "stopping",
     ...overrides,
   };
 }
