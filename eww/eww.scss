@@ -3,7 +3,8 @@ $surface-raised: rgba(66, 43, 47, 0.9);
 $surface-deep: rgba(27, 19, 19, 0.48);
 $surface-soft: rgba(201, 140, 175, 0.09);
 $primary: #d58fab;
-$active: #b96f88;
+$primary-fill: #884b60;
+$primary-fill-hover: #7b4255;
 $text: #f0dfcb;
 $muted: #bfa894;
 $muted-deep: #806d61;
@@ -174,13 +175,13 @@ window {
   min-height: 40px;
   padding: 0 14px;
   border-radius: 9px;
-  background-color: $primary;
-  color: #302021;
+  background-color: $primary-fill;
+  color: $text;
   font-weight: 800;
 }
 
 .primary-button:hover {
-  background-color: $active;
+  background-color: $primary-fill-hover;
   color: $text;
 }
 

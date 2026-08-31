@@ -642,6 +642,7 @@ describe("Eww source assets", () => {
       readFile(join(repositoryDirectory, "eww", "eww.scss"), "utf8"),
     ]);
     const panelRule = scss.match(/\.toggl-panel\s*\{([^}]*)\}/)?.[1] ?? "";
+    const primaryButtonRule = scss.match(/\.primary-button\s*\{([^}]*)\}/)?.[1] ?? "";
     const placeholders = [...new Set(yuck.match(/__[A-Z][A-Z_]+__/g) ?? [])].sort();
 
     expect(yuck).toContain(":focusable false");
@@ -653,6 +654,9 @@ describe("Eww source assets", () => {
       "__TOGGL_WAYBAR_EXECUTABLE__",
     ]);
     expect(panelRule).not.toContain("min-width");
+    expect(primaryButtonRule).toContain("background-color: $primary-fill");
+    expect(primaryButtonRule).toContain("color: $text");
+    expect(primaryButtonRule).not.toContain("#302021");
     expect(scss).toMatch(/window\s*\{[^}]*background-color:\s*transparent;/s);
     expect(scss).toMatch(/\.drawer-backdrop,[^{]*\{[^}]*background-color:\s*transparent;/s);
     expect(scss).not.toMatch(/font-weight:\s*(?:650|750)/);
