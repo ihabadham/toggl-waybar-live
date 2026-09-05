@@ -6,14 +6,15 @@ import {
   applyMonthEntry,
   applyMonthRelayMessage,
   completedMonthSeconds,
+  completedWeekSeconds,
   createMonthState,
   markMonthRefreshFailed,
   replaceReconciledMonthEntries,
 } from "../src/month-state.js";
-import { monthWindowAt } from "../src/month-window.js";
+import { periodWindowAt } from "../src/period-window.js";
 
-const august = monthWindowAt("2026-08-15T12:00:00Z", "Africa/Cairo");
-const september = monthWindowAt("2026-09-15T12:00:00Z", "Africa/Cairo");
+const august = periodWindowAt("2026-08-15T12:00:00Z", "Africa/Cairo", 0);
+const september = periodWindowAt("2026-09-15T12:00:00Z", "Africa/Cairo", 0);
 
 function entry(overrides: Partial<NormalizedEntry> = {}): NormalizedEntry {
   return {
@@ -58,7 +59,7 @@ describe("current month state", () => {
       partial: false,
       synchronizedAt: "2026-08-15T12:00:00Z",
     });
-    expect(completedMonthSeconds(state)).toBe(3_600);
+    expect(completedMonthSeconds(state, august)).toBe(3_600);
   });
 
   it("merges local and webhook changes and deletes by entry identity", () => {
@@ -68,14 +69,14 @@ describe("current month state", () => {
       changed(entry({ durationSeconds: 5_400, stop: "2026-08-10T11:30:00Z" })),
       august,
     );
-    expect(completedMonthSeconds(state)).toBe(5_400);
+    expect(completedMonthSeconds(state, august)).toBe(5_400);
 
     state = applyMonthRelayMessage(
       state,
       changed(entry({ stop: null, durationSeconds: null })),
       august,
     );
-    expect(completedMonthSeconds(state)).toBe(5_400);
+    expect(completedMonthSeconds(state, august)).toBe(5_400);
 
     state = applyMonthEntry(state, entry({ id: "102", stop: null, durationSeconds: null }), august);
     expect(state.entries.has("102")).toBe(true);
@@ -101,7 +102,7 @@ describe("current month state", () => {
     );
   });
 
-  it("clears entries, synchronization, and completeness at month rollover", () => {
+  it("retains only cross-month week entries and marks them stale at month rollover", () => {
     const augustState = replaceReconciledMonthEntries(
       createMonthState(august),
       [entry()],
@@ -110,6 +111,29 @@ describe("current month state", () => {
       true,
     );
 
-    expect(advanceMonth(augustState, september)).toEqual(createMonthState(september));
+    expect(advanceMonth(augustState, september)).toMatchObject({
+      availability: "stale",
+      entries: new Map(),
+      monthKey: "2026-09",
+      partial: true,
+      synchronizedAt: "2026-08-31T20:00:00Z",
+    });
+  });
+
+  it("derives week and month totals independently across a month boundary", () => {
+    const boundary = periodWindowAt("2026-09-01T12:00:00Z", "Africa/Cairo", 0);
+    const state = replaceReconciledMonthEntries(
+      createMonthState(boundary),
+      [
+        entry({ id: "august", start: "2026-08-30T08:00:00Z" }),
+        entry({ id: "september", start: "2026-09-01T08:00:00Z", durationSeconds: 1_800 }),
+      ],
+      boundary,
+      "2026-09-01T12:00:00Z",
+      false,
+    );
+
+    expect(completedWeekSeconds(state, boundary)).toBe(5_400);
+    expect(completedMonthSeconds(state, boundary)).toBe(1_800);
   });
 });

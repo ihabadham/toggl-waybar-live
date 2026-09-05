@@ -179,6 +179,7 @@ function coordinator(
   const instance = new ClientCoordinator({
     api: apiValue,
     timezone: "Africa/Cairo",
+    weekStart: 0,
     quotaGate: options.quotaGate ?? { record: options.quotaRecord ?? vi.fn() },
     requestScheduler: options.requestScheduler ?? immediateScheduler(),
     now: options.now ?? (() => now),
@@ -195,7 +196,7 @@ function coordinator(
 }
 
 describe("client coordinator", () => {
-  it("projects timezone, Today history, and locally observed month totals", async () => {
+  it("projects timezone, Today history, and locally observed week and month totals", async () => {
     const original = entry({
       id: "700",
       description: "Implement drawer",
@@ -235,6 +236,14 @@ describe("client coordinator", () => {
         availability: "unavailable",
         partial: false,
         key: "2026-08",
+        completedSeconds: 1_800,
+        currentContributes: false,
+        synchronizedAt: null,
+      },
+      week: {
+        availability: "unavailable",
+        partial: false,
+        key: "2026-08-23",
         completedSeconds: 1_800,
         currentContributes: false,
         synchronizedAt: null,
@@ -1608,6 +1617,7 @@ describe("client coordinator", () => {
     const instance = new ClientCoordinator({
       api: api(),
       timezone: "Africa/Cairo",
+      weekStart: 0,
       quotaGate: { record: vi.fn() },
       requestScheduler: immediateScheduler(),
       now: () => now,

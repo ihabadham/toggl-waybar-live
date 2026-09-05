@@ -58,6 +58,7 @@ export async function startDaemon(): Promise<DaemonController> {
     quotaGate: quota,
     requestScheduler,
     timezone: config.timezone,
+    weekStart: config.weekStart,
   });
 
   const reconcile = async (): Promise<void> => {

@@ -524,6 +524,7 @@ describe("Eww source assets", () => {
       todayEntries: [],
       todayEntriesOmitted: 0,
       todayEntriesOmittedLabel: "",
+      week: { availability: "unavailable", value: "—", cue: "" },
       month: { availability: "unavailable", value: "—", cue: "" },
       pending: null,
       error: "Toggl daemon unavailable",
@@ -564,6 +565,8 @@ describe("Eww source assets", () => {
     expect(presetRow).toContain(':class "play-affordance"');
     expect(yuck).not.toContain("RECENT");
     expect(yuck).not.toMatch(/\/\s*8\b/);
+    expect(glance).toContain('text "THIS WEEK"');
+    expect(glance).toContain("toggl_view.week.value");
 
     const currentIndex = panel.indexOf("(current-summary)");
     const controlsIndex = panel.indexOf("(primary-controls)");
@@ -589,7 +592,7 @@ describe("Eww source assets", () => {
     expect(glance).toContain(":reveal {toggl_view.todayEntryCount == 0}");
     expect(glance).toContain("toggl_view.todayEntries");
     expect(glance).toContain("toggl_view.todayEntriesOmittedLabel");
-    expect(glance).toContain(`:class "month-card \${toggl_view.month.availability}"`);
+    expect(glance).toContain(`:class "period-card month-card \${toggl_view.month.availability}"`);
     expect(glance).toContain("toggl_view.month.value");
     expect(glance).toContain("toggl_view.month.cue");
   });

@@ -107,6 +107,13 @@ export const controlMonthProjectionSchema = z.strictObject({
   synchronizedAt: rfc3339Schema.nullable(),
 });
 
+export const controlWeekProjectionSchema = controlMonthProjectionSchema.omit({ key: true }).extend({
+  key: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .nullable(),
+});
+
 export const controlSnapshotSchema = z
   .strictObject({
     version: z.literal(1),
@@ -123,6 +130,7 @@ export const controlSnapshotSchema = z
     todayEntryCount: z.number().int().nonnegative(),
     todayEntriesOmitted: z.number().int().nonnegative(),
     month: controlMonthProjectionSchema,
+    week: controlWeekProjectionSchema.optional(),
     presets: z.array(resumePresetSchema).max(maximumPresets),
     generatedAt: rfc3339Schema,
     lastSynchronizedAt: rfc3339Schema.nullable(),
@@ -169,4 +177,5 @@ export type CommandResult = z.infer<typeof commandResultSchema>;
 export type ControlCurrentEntry = z.infer<typeof controlCurrentEntrySchema>;
 export type ControlTodayEntry = z.infer<typeof controlTodayEntrySchema>;
 export type ControlMonthProjection = z.infer<typeof controlMonthProjectionSchema>;
+export type ControlWeekProjection = z.infer<typeof controlWeekProjectionSchema>;
 export type ControlSnapshot = z.infer<typeof controlSnapshotSchema>;

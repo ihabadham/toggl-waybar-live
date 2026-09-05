@@ -25,16 +25,16 @@ click. A keyboard invocation opens it on the currently focused output. Only
 one drawer is visible at a time.
 
 The drawer keeps its actions ahead of history: current activity and primary
-Stop or Resume Last control, up to eight Quick Resume rows, then Today and This
-Month at a glance. Quick Resume remains visible but disabled while a timer is
-running. Stopping from the drawer keeps it open; choosing an activity while
-idle starts it and closes the drawer.
+Stop or Resume Last control, up to eight Quick Resume rows, then Today, This
+Week, and This Month at a glance. Quick Resume remains visible but disabled
+while a timer is running. Stopping from the drawer keeps it open; choosing an
+activity while idle starts it and closes the drawer.
 
 Today starts collapsed each time the drawer opens. Its glance shows the live
 total and entry count; selecting it reveals newest-first rows with description,
 project/task context, local start-stop range, and duration. Running rows and
-the Today total tick locally. This Month shows a compact hours-and-minutes
-total, with visible stale or partial cues when applicable.
+the Today total tick locally. This Week and This Month show compact
+hours-and-minutes totals, with visible stale or partial cues when applicable.
 
 Escape, clicking outside, or repeating the drawer shortcut closes it. Errors
 stay visible in the drawer.
@@ -118,24 +118,26 @@ narrow hosted webhook protocol is not expanded. A relay event may update timing
 state without erasing richer local resume metadata. Presets survive midnight,
 daemon restarts, and cache cleanup.
 
-### Today and month projection
+### Today, week, and month projection
 
-The daemon owns the Today timeline and current-month aggregate in memory. Both
-use local day or month boundaries in the configured IANA timezone, with an
-entry attributed to the period in which it started. Entries spanning a
-boundary are not split. Repeated descriptions remain separate time-entry rows.
+The daemon owns the Today timeline and current-week and current-month
+aggregates in memory. They use local day, configured week-start, or month
+boundaries in the configured IANA timezone, with an entry attributed to the
+period in which it started. Entries spanning a boundary are not split.
+Repeated descriptions remain separate time-entry rows.
 
-The drawer receives bounded Today rows and only the month aggregate, never full
-month history. A single local one-second tick advances the current timer, Today
-total, running Today row, and eligible month total from the latest watch
-snapshot. Ticking does not open another subscription, reread configuration, or
-call Toggl.
+The drawer receives bounded Today rows and only the week and month aggregates,
+never full history. A single local one-second tick advances the current timer,
+Today total, running Today row, and eligible week and month totals from the
+latest watch snapshot. Ticking does not open another subscription, reread
+configuration, or call Toggl.
 
-The month read is optional and runs at most hourly inside full reconciliation,
-after Today and current state succeed. Before its first success, the drawer
-shows an em dash. A later failure preserves the last value and marks it stale.
-A response reaching the 1,000-entry ceiling is treated as partial and displayed
-as a lower bound with `≥`; partial and stale cues can appear together. Month
+The shared week/month history read is optional and runs at most hourly inside
+full reconciliation, after Today and current state succeed. Before its first
+success, the drawer shows an em dash. A later failure preserves the last value
+and marks it stale. A response reaching the 1,000-entry ceiling is treated as
+partial and displayed as a lower bound with `≥`; partial and stale cues can
+appear together. Month
 availability never disables Stop, Resume Last, or Quick Resume.
 
 ## Mutation behavior
