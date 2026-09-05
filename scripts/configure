@@ -34,6 +34,15 @@ data_root=${XDG_DATA_HOME:-"$HOME/.local/share"}
 data_directory=$data_root/toggl-waybar-live
 client_directory=$data_directory/client
 binary_directory=${TOGGL_WAYBAR_BIN_DIR:-"$HOME/.local/bin"}
+week_start=${TOGGL_WEEK_START:-1}
+
+case "$week_start" in
+  0 | 1 | 2 | 3 | 4 | 5 | 6) ;;
+  *)
+    printf 'TOGGL_WEEK_START must be 0 (Sunday) through 6 (Saturday).\n' >&2
+    exit 1
+    ;;
+esac
 
 if ! node -e '
   const safePath = /^[A-Za-z0-9_./:@+=,-]+$/;
@@ -214,6 +223,7 @@ trap cleanup EXIT HUP INT TERM
 {
   printf 'TOGGL_API_TOKEN=%s\n' "$api_token"
   printf 'TOGGL_TIMEZONE=%s\n' "$timezone"
+  printf 'TOGGL_WEEK_START=%s\n' "$week_start"
   printf 'TOGGL_RELAY_URL=%s\n' "$relay_url"
   printf 'TOGGL_RELAY_TOKEN=%s\n' "$relay_token"
 } >"$environment_temporary"

@@ -5,6 +5,7 @@ export interface ClientConfig {
   relayUrl: string;
   timezone: string;
   togglApiToken: string;
+  weekStart: number;
 }
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
@@ -79,6 +80,14 @@ function labelLimit(value: string | undefined): number {
   return limit;
 }
 
+function weekStart(value: string | undefined): number {
+  const configured = value ?? "1";
+  if (!/^[0-6]$/.test(configured)) {
+    throw new Error("TOGGL_WEEK_START must be an integer from 0 (Sunday) to 6 (Saturday)");
+  }
+  return Number(configured);
+}
+
 export function loadRendererOptions(
   environment: NodeJS.ProcessEnv = process.env,
 ): Pick<ClientConfig, "labelMaxChars"> {
@@ -95,6 +104,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Client
     apiBaseUrl: apiBaseUrl(environment.TOGGL_API_BASE_URL),
     togglApiToken: required(environment, "TOGGL_API_TOKEN"),
     timezone,
+    weekStart: weekStart(environment.TOGGL_WEEK_START),
     relayUrl: relayUrl(required(environment, "TOGGL_RELAY_URL")),
     relayToken: required(environment, "TOGGL_RELAY_TOKEN"),
     ...loadRendererOptions(environment),

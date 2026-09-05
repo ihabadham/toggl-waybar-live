@@ -107,7 +107,7 @@ One systemd user service owns all network access. It:
 
 - maintains one authenticated WebSocket, regardless of Waybar output count;
 - fetches today's entries at startup and after a meaningful offline period;
-- maintains Today and current-month entry maps plus project metadata locally;
+- maintains Today and bounded week/month history plus project metadata locally;
 - serializes stop/resume commands received through a private Unix socket;
 - persists up to eight exact resume activities under the XDG state directory;
 - merges relay changes into the local derived state;
@@ -146,17 +146,18 @@ Eww drawer consumes the watch projection and invokes the same CLI; it performs
 no network requests and receives no token.
 
 The drawer projection contains the current activity, Quick Resume rows, a
-bounded newest-first Today timeline, and a compact current-month aggregate.
+bounded newest-first Today timeline, and compact current-week and current-month
+aggregates.
 One local one-second tick advances the current duration, Today total, running
-Today row, and eligible month total together. The tick reuses the latest watch
-snapshot; it does not create another socket subscription, configuration read,
-or Toggl request.
+Today row, and eligible week and month totals together. The tick reuses the
+latest watch snapshot; it does not create another socket subscription,
+configuration read, or Toggl request.
 
 Today history is capped at 50 rows and trimmed further when needed to keep the
 projected snapshot at or below 48 KiB inside the protocol's 64 KiB frame limit.
 The projection reports the total row count and how many earlier rows were
 omitted, so truncation is visible rather than silent. The drawer receives only
-the month aggregate, not full month history.
+the week and month aggregates, not full history.
 
 ## Toggl integration
 
@@ -179,8 +180,8 @@ The daemon reconciles through `GET /api/v9/me/time_entries` with the current
 local day's start and end, plus `GET /api/v9/me/time_entries/current`. The
 second request is required because Toggl filters the list by entry start time;
 an entry that began before local midnight can still be running. Results are
-merged by entry ID. A separate bounded list request refreshes the current-month
-aggregate when due.
+merged by entry ID. A separate bounded list request refreshes the union of the
+current-week and current-month aggregates when due.
 
 Local stop uses Toggl's workspace-scoped stop endpoint. Resume creates a new
 entry containing the preset's workspace, description, project, task, tags, and

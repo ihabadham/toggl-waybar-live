@@ -5,7 +5,7 @@
 (defvar today_expanded false)
 
 (deflisten toggl_view
-  :initial "{\"version\":1,\"status\":\"offline\",\"connection\":\"offline\",\"confidence\":\"uncertain\",\"current\":null,\"today\":\"00:00:00\",\"todayEntryCount\":0,\"todayEntryCountLabel\":\"0 entries\",\"todayEntries\":[],\"todayEntriesOmitted\":0,\"todayEntriesOmittedLabel\":\"\",\"month\":{\"availability\":\"unavailable\",\"value\":\"—\",\"cue\":\"\"},\"pending\":null,\"error\":\"Toggl daemon unavailable\",\"presets\":[]}"
+  :initial "{\"version\":1,\"status\":\"offline\",\"connection\":\"offline\",\"confidence\":\"uncertain\",\"current\":null,\"today\":\"00:00:00\",\"todayEntryCount\":0,\"todayEntryCountLabel\":\"0 entries\",\"todayEntries\":[],\"todayEntriesOmitted\":0,\"todayEntriesOmittedLabel\":\"\",\"week\":{\"availability\":\"unavailable\",\"value\":\"—\",\"cue\":\"\"},\"month\":{\"availability\":\"unavailable\",\"value\":\"—\",\"cue\":\"\"},\"pending\":null,\"error\":\"Toggl daemon unavailable\",\"presets\":[]}"
   `"__TOGGL_WAYBAR_EXECUTABLE__" watch`)
 
 ; Eww #1451 can lose :visible updates while the drawer is closed. Non-animated
@@ -305,17 +305,40 @@
             :show-truncated false
             :text {today_expanded ? "⌃" : "⌄"})))
       (box
-        :class "month-card ${toggl_view.month.availability}"
+        :class "period-card week-card ${toggl_view.week.availability}"
         :orientation "vertical"
         :space-evenly false
-        :width 210
+        :width 148
+        (label
+          :class "glance-label"
+          :halign "start"
+          :show-truncated false
+          :text "THIS WEEK")
+        (label
+          :class "glance-value period"
+          :halign "start"
+          :show-truncated false
+          :text {toggl_view.week.value})
+        (revealer
+          :reveal {toggl_view.week.cue != ""}
+          :transition "none"
+          (label
+            :class "period-cue"
+            :halign "start"
+            :show-truncated false
+            :text {toggl_view.week.cue})))
+      (box
+        :class "period-card month-card ${toggl_view.month.availability}"
+        :orientation "vertical"
+        :space-evenly false
+        :width 172
         (label
           :class "glance-label"
           :halign "start"
           :show-truncated false
           :text "THIS MONTH")
         (label
-          :class "glance-value month"
+          :class "glance-value period"
           :halign "start"
           :show-truncated false
           :text {toggl_view.month.value})
@@ -323,7 +346,7 @@
           :reveal {toggl_view.month.cue != ""}
           :transition "none"
           (label
-            :class "month-cue"
+            :class "period-cue"
             :halign "start"
             :show-truncated false
             :text {toggl_view.month.cue}))))

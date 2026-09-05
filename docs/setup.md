@@ -29,6 +29,15 @@ by `/webhooks/toggl`; the daemon URL uses `wss://` followed by `/ws`.
 
 ## Configure the local client
 
+The drawer treats Monday as the first day of the week by default. To match a
+different Toggl profile setting, pass Toggl's day number when configuring:
+
+```sh
+TOGGL_WEEK_START=0 scripts/configure
+```
+
+Toggl numbers Sunday as `0`, Monday as `1`, through Saturday as `6`.
+
 ```sh
 ./scripts/configure
 ```

@@ -291,6 +291,7 @@ describe("client configuration", () => {
       timezone: "Africa/Cairo",
       relayUrl: "wss://relay.example/ws",
       labelMaxChars: 12,
+      weekStart: 1,
     });
   });
 
@@ -324,5 +325,12 @@ describe("client configuration", () => {
     expect(() =>
       loadConfig({ ...validEnvironment, TOGGL_TIMEZONE: "private-invalid-value" }),
     ).toThrowError("TOGGL_TIMEZONE must be a valid IANA timezone");
+  });
+
+  it("loads and validates the configured first day of the week", () => {
+    expect(loadConfig({ ...validEnvironment, TOGGL_WEEK_START: "0" }).weekStart).toBe(0);
+    expect(() => loadConfig({ ...validEnvironment, TOGGL_WEEK_START: "7" })).toThrowError(
+      "TOGGL_WEEK_START",
+    );
   });
 });

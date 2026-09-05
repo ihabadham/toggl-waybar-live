@@ -91,6 +91,7 @@ vi.mock("../src/config.js", () => ({
     relayToken: "relay-token",
     relayUrl: "ws://127.0.0.1:3001/ws",
     timezone: "Africa/Cairo",
+    weekStart: 0,
     togglApiToken: "api-token",
   }),
 }));

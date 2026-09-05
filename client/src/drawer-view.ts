@@ -3,6 +3,7 @@ import type {
   ControlMonthProjection,
   ControlSnapshot,
   ControlTodayEntry,
+  ControlWeekProjection,
 } from "./control-protocol.js";
 import { projectColor as validatedProjectColor } from "./project-color.js";
 
@@ -32,8 +33,8 @@ export interface DrawerTodayRow extends DrawerContext {
   running: boolean;
 }
 
-export interface DrawerMonth {
-  availability: ControlMonthProjection["availability"];
+export interface DrawerPeriod {
+  availability: ControlMonthProjection["availability"] | ControlWeekProjection["availability"];
   cue: "" | "partial" | "stale" | "partial · stale";
   value: string;
 }
@@ -43,7 +44,7 @@ export interface DrawerView {
   connection: ControlSnapshot["connection"];
   current: DrawerCurrent | null;
   error: string | null;
-  month: DrawerMonth;
+  month: DrawerPeriod;
   pending: string | null;
   presets: DrawerPresetRow[];
   status: ControlSnapshot["status"];
@@ -53,6 +54,7 @@ export interface DrawerView {
   todayEntriesOmittedLabel: string;
   todayEntryCount: number;
   todayEntryCountLabel: string;
+  week: DrawerPeriod;
   version: 1;
 }
 
@@ -126,22 +128,25 @@ function completedDuration(entry: ControlTodayEntry): number {
     : Math.max(0, (Date.parse(entry.stop) - Date.parse(entry.start)) / 1_000);
 }
 
-function monthView(month: ControlMonthProjection, currentElapsed: number): DrawerMonth {
-  if (month.availability === "unavailable") {
-    return { availability: month.availability, value: "—", cue: "" };
+function periodView(
+  period: ControlMonthProjection | ControlWeekProjection | undefined,
+  currentElapsed: number,
+): DrawerPeriod {
+  if (period === undefined || period.availability === "unavailable") {
+    return { availability: "unavailable", value: "—", cue: "" };
   }
 
-  const duration = month.completedSeconds + (month.currentContributes ? currentElapsed : 0);
-  const cue = month.partial
-    ? month.availability === "stale"
+  const duration = period.completedSeconds + (period.currentContributes ? currentElapsed : 0);
+  const cue = period.partial
+    ? period.availability === "stale"
       ? "partial · stale"
       : "partial"
-    : month.availability === "stale"
+    : period.availability === "stale"
       ? "stale"
       : "";
   return {
-    availability: month.availability,
-    value: `${month.partial ? "≥ " : ""}${formatMonthDuration(duration)}`,
+    availability: period.availability,
+    value: `${period.partial ? "≥ " : ""}${formatMonthDuration(duration)}`,
     cue,
   };
 }
@@ -205,7 +210,8 @@ export function drawerView(snapshot: ControlSnapshot, now = new Date().toISOStri
     todayEntries,
     todayEntriesOmitted: snapshot.todayEntriesOmitted,
     todayEntriesOmittedLabel: omittedEntriesLabel(snapshot.todayEntriesOmitted),
-    month: monthView(snapshot.month, currentElapsed),
+    week: periodView(snapshot.week, currentElapsed),
+    month: periodView(snapshot.month, currentElapsed),
     pending:
       snapshot.pending === "stopping"
         ? "Stopping…"

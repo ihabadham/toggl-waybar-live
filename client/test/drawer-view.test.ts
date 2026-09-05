@@ -47,6 +47,14 @@ function snapshot(overrides: Partial<ControlSnapshot> = {}): ControlSnapshot {
       currentContributes: true,
       synchronizedAt: "2026-08-27T11:00:00Z",
     },
+    week: {
+      availability: "ready",
+      partial: false,
+      key: "2026-08-23",
+      completedSeconds: 5_400,
+      currentContributes: true,
+      synchronizedAt: "2026-08-27T11:00:00Z",
+    },
     presets: [
       {
         id: "0182cc10-54d1-7c35-b4f3-e93bb4c0b100",
@@ -78,18 +86,20 @@ function expectOnlyNonNullPrimitives(record: object): void {
 }
 
 describe("drawer view", () => {
-  it("advances the current, Today row, Today total, and month total from one clock tick", () => {
+  it("advances the current, Today row, Today, week, and month totals from one clock tick", () => {
     const before = drawerView(snapshot(), "2026-08-27T11:00:59Z");
     const after = drawerView(snapshot(), "2026-08-27T11:01:00Z");
 
     expect(before.current?.elapsed).toBe("01:00:59");
     expect(before.todayEntries[0]?.duration).toBe("01:00:59");
     expect(before.today).toBe("02:00:59");
+    expect(before.week).toEqual({ availability: "ready", value: "2h 30m", cue: "" });
     expect(before.month).toEqual({ availability: "ready", value: "3h 00m", cue: "" });
 
     expect(after.current?.elapsed).toBe("01:01:00");
     expect(after.todayEntries[0]?.duration).toBe("01:01:00");
     expect(after.today).toBe("02:01:00");
+    expect(after.week).toEqual({ availability: "ready", value: "2h 31m", cue: "" });
     expect(after.month).toEqual({ availability: "ready", value: "3h 01m", cue: "" });
   });
 

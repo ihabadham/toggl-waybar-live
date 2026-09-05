@@ -17,12 +17,19 @@ import {
   applyMonthEntry,
   applyMonthRelayMessage,
   completedMonthSeconds,
+  completedWeekSeconds,
   createMonthState,
   type MonthState,
   markMonthRefreshFailed,
   replaceReconciledMonthEntries,
 } from "./month-state.js";
-import { instantBelongsToMonth, type MonthWindow, monthWindowAt } from "./month-window.js";
+import type { MonthWindow } from "./month-window.js";
+import {
+  instantBelongsToMonth,
+  instantBelongsToWeek,
+  type PeriodWindow,
+  periodWindowAt,
+} from "./period-window.js";
 import {
   activityFromPreset,
   mergePresets,
@@ -90,6 +97,7 @@ export interface ClientCoordinatorOptions {
   quotaGate: CoordinatorQuotaGate;
   requestScheduler: CoordinatorRequestScheduler;
   timezone: string;
+  weekStart: number;
 }
 
 type Subscriber = (snapshot: ControlSnapshot) => void;
@@ -197,7 +205,7 @@ export class ClientCoordinator {
     this.presets = mergePresets(options.initialPresets ?? []);
     const now = this.now();
     this.state = options.initialState ?? createState(this.window(now).dayKey);
-    this.monthState = options.initialMonthState ?? createMonthState(this.monthWindow(now));
+    this.monthState = options.initialMonthState ?? createMonthState(this.periodWindow(now));
   }
 
   snapshot(): ControlSnapshot {
@@ -206,7 +214,7 @@ export class ClientCoordinator {
 
   private snapshotAt(generatedAt: string): ControlSnapshot {
     const current = this.state.current;
-    const monthWindow = this.monthWindow(generatedAt);
+    const monthWindow = this.periodWindow(generatedAt);
     const base: ControlSnapshotBase = {
       version: 1,
       type: "snapshot",
@@ -235,11 +243,19 @@ export class ClientCoordinator {
         availability: this.monthState.availability,
         partial: this.monthState.partial,
         key: this.monthState.monthKey,
-        completedSeconds: completedMonthSeconds(this.monthState),
+        completedSeconds: completedMonthSeconds(this.monthState, monthWindow),
         currentContributes:
           current !== null &&
           this.monthState.monthKey === monthWindow.monthKey &&
           instantBelongsToMonth(current.start, monthWindow),
+        synchronizedAt: this.monthState.synchronizedAt,
+      },
+      week: {
+        availability: this.monthState.availability,
+        partial: this.monthState.partial,
+        key: monthWindow.weekKey,
+        completedSeconds: completedWeekSeconds(this.monthState, monthWindow),
+        currentContributes: current !== null && instantBelongsToWeek(current.start, monthWindow),
         synchronizedAt: this.monthState.synchronizedAt,
       },
       presets: [...this.presets],
@@ -316,7 +332,7 @@ export class ClientCoordinator {
 
   advanceCalendar(): void {
     const now = this.now();
-    const monthState = advanceMonth(this.monthState, this.monthWindow(now));
+    const monthState = advanceMonth(this.monthState, this.periodWindow(now));
     if (monthState !== this.monthState) {
       this.monthRefreshRequested = true;
       this.updateMonthState(monthState);
@@ -479,13 +495,13 @@ export class ClientCoordinator {
     this.ambiguousCreateUnresolved = false;
     this.mergeMonthEntries(
       [...today.data, ...(current.data === null ? [] : [current.data])],
-      this.monthWindow(now),
+      this.periodWindow(now),
     );
     this.commit(next, { confidence: "confirmed", error: null });
     await this.refreshPresets([...today.data, ...(current.data === null ? [] : [current.data])]);
 
     const monthNow = this.now();
-    const monthWindow = this.monthWindow(monthNow);
+    const monthWindow = this.periodWindow(monthNow);
     if (!this.monthRefreshDue(monthNow.getTime()) || !this.quotaAllowsRequest()) {
       return "completed";
     }
@@ -580,8 +596,8 @@ export class ClientCoordinator {
     return dayWindowAt(now, this.options.timezone);
   }
 
-  private monthWindow(now: string | Date): MonthWindow {
-    return monthWindowAt(now, this.options.timezone);
+  private periodWindow(now: string | Date): PeriodWindow {
+    return periodWindowAt(now, this.options.timezone, this.options.weekStart);
   }
 
   private quotaAllowsRequest(): boolean {
@@ -600,7 +616,7 @@ export class ClientCoordinator {
   }
 
   private monthResultRelevant(
-    window: MonthWindow,
+    window: PeriodWindow,
     revision: number,
     timerRevision: number,
     epoch: number,
@@ -616,7 +632,7 @@ export class ClientCoordinator {
     );
   }
 
-  private mergeMonthEntries(entries: readonly RichTogglEntry[], window: MonthWindow): void {
+  private mergeMonthEntries(entries: readonly RichTogglEntry[], window: PeriodWindow): void {
     let next = this.monthState;
     for (const entry of entries) {
       next = applyMonthEntry(next, entry, window);
@@ -669,7 +685,7 @@ export class ClientCoordinator {
 
   private commitRelayMessage(message: RelayMessage, window: DayWindow): void {
     this.updateMonthState(
-      applyMonthRelayMessage(this.monthState, message, this.monthWindow(this.now())),
+      applyMonthRelayMessage(this.monthState, message, this.periodWindow(this.now())),
     );
     const next = applyRelayMessage(this.state, message, window);
     const confidence =
@@ -930,7 +946,7 @@ export class ClientCoordinator {
     const window = this.window(this.now());
     if (stopped.ok) {
       this.updateMonthState(
-        applyMonthEntry(this.monthState, stopped.data, this.monthWindow(this.now())),
+        applyMonthEntry(this.monthState, stopped.data, this.periodWindow(this.now())),
       );
       const next = setPending(applyRichStopResult(this.state, stopped.data, window), null);
       this.confirmStoppedEntry(target.id, next);
@@ -1035,7 +1051,7 @@ export class ClientCoordinator {
       const next = setPending(applyRichCreateResult(this.state, created.data, window), null);
       if (next.current?.id === created.data.id) {
         this.updateMonthState(
-          applyMonthEntry(this.monthState, created.data, this.monthWindow(this.now())),
+          applyMonthEntry(this.monthState, created.data, this.periodWindow(this.now())),
         );
         this.confirmLocalCurrent(next, created.data);
       }
