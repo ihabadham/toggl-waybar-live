@@ -14,7 +14,7 @@
     "@toggl-waybar-live/shared": "*"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "1.1.1",
-    "wrangler": "4.127.0"
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "wrangler": "4.156.0"
   }
 }
